@@ -674,20 +674,16 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     stars_cart = stars_earth_icrs.cartesian.xyz.value.T  # Shape: (N, 3) - positions from Earth
     target_cart = target_3d.cartesian.xyz.value  # Shape: (3,) - target position from Earth
     
-    # Vector from target to each star (in ICRS cartesian coordinates)
+    # Use unified get_relative_coords function to calculate vectors from target
+    vectors_from_target, d_new_pc, _ = get_relative_coords(target_cart, stars_cart)
+    
     # For bright background objects, use their Earth-centric direction directly
     # (they appear at the same projected position regardless of target star)
-    vectors_from_target = stars_cart - target_cart  # Shape: (N, 3)
     if np.any(bright_background_mask):
         # Replace with Earth-centric unit vectors for bright background objects
         # These appear at the same position regardless of target star (fixed background)
         # The azimuth/elevation calculated from these will be Earth-centric
         vectors_from_target[bright_background_mask] = bright_bg_cart
-    
-    # Calculate distance from target star
-    # For bright background objects, distance is effectively infinite (use large value)
-    d_new_pc = np.linalg.norm(vectors_from_target, axis=1)  # Euclidean distance
-    if np.any(bright_background_mask):
         # Bright background objects are at effectively infinite distance
         d_new_pc[bright_background_mask] = ASSUMED_BACKGROUND_DISTANCE_PC
     
@@ -1151,19 +1147,56 @@ def plot_galaxy_on_hemisphere(ax, galaxy, azimuth_rad, elevation_rad, is_north_h
         # Offset down for cyan galaxies
         center_in_hemisphere = (is_north_hemisphere and elevation_rad > 0) or (not is_north_hemisphere and elevation_rad < 0)
         if center_in_hemisphere or not clip_to_equator:
-            # Calculate text height in radial units
             fontsize = 9
-            text_height_radial = calculate_text_height_radial(ax, fontsize, radial_center)
-            
-            # Position label below center: move down by half text height plus spacing
-            if is_north_hemisphere:
-                label_radial = radial_center + text_height_radial * 0.5 + 0.01
-            else:
-                label_radial = radial_center - text_height_radial * 0.5 - 0.01
-            
-            ax.text(azimuth_rad, label_radial, galaxy['name'], 
-                    color='cyan', fontsize=fontsize, ha='center', va='center', weight='bold',
-                    transform=ax.transData)
+            # Use ax.annotate with offset points for proper label positioning
+            ax.annotate(galaxy['name'],
+                       xy=(azimuth_rad, radial_center),
+                       xytext=(0, -10),  # 10 points below the star
+                       textcoords='offset points',
+                       ha='center', va='top',
+                       color='cyan', fontsize=fontsize, weight='bold',
+                       transform=ax.transData)
+
+def get_relative_coords(target_xyz, object_xyz):
+    """Calculate relative coordinates from target to object.
+    
+    This is a unified utility function that calculates the relative vector,
+    distance, and unit direction vector from target to object.
+    
+    Args:
+        target_xyz: Target position as 3D cartesian coordinates (shape: (3,) or (N, 3))
+        object_xyz: Object position as 3D cartesian coordinates (shape: (3,) or (N, 3))
+    
+    Returns:
+        tuple: (vector_from_target, distance_pc, unit_vector)
+            - vector_from_target: Vector from target to object (same shape as inputs)
+            - distance_pc: Distance in parsecs (scalar or array)
+            - unit_vector: Normalized direction vector (same shape as inputs)
+    """
+    # Handle both single vectors and arrays
+    target_xyz = np.asarray(target_xyz)
+    object_xyz = np.asarray(object_xyz)
+    
+    # Vector from target to object
+    vector_from_target = object_xyz - target_xyz
+    
+    # Calculate distance
+    if vector_from_target.ndim == 1:
+        distance_pc = np.linalg.norm(vector_from_target)
+        # Normalize to get unit direction vector (single vector case)
+        if distance_pc > 1e-10:
+            unit_vector = vector_from_target / distance_pc
+        else:
+            unit_vector = vector_from_target
+    else:
+        distance_pc = np.linalg.norm(vector_from_target, axis=-1)
+        # Normalize to get unit direction vector (array case)
+        vector_norm = distance_pc[..., np.newaxis]
+        # Avoid division by zero
+        vector_norm = np.where(vector_norm > 1e-10, vector_norm, 1.0)
+        unit_vector = vector_from_target / vector_norm
+    
+    return vector_from_target, distance_pc, unit_vector
 
 def transform_to_target_frame(target_coord, object_ra_deg, object_dec_deg, object_distance_pc, use_earth_centric_approx=False):
     """Transform object coordinates to azimuth/elevation from target's perspective.
@@ -1201,16 +1234,8 @@ def transform_to_target_frame(target_coord, object_ra_deg, object_dec_deg, objec
         # Get cartesian coordinates from Earth
         object_cart = object_icrs.cartesian.xyz.value  # Shape: (3,)
         
-        # Vector from target to object
-        vector_from_target = object_cart - target_cart  # Shape: (3,)
-        
-        # Normalize to get unit direction vector
-        vector_norm = np.linalg.norm(vector_from_target)
-        if vector_norm > 1e-10:
-            unit_vector = vector_from_target / vector_norm
-        else:
-            # Object and target are at same position (shouldn't happen for known objects)
-            unit_vector = vector_from_target
+        # Use unified get_relative_coords function
+        _, _, unit_vector = get_relative_coords(target_cart, object_cart)
     
     # Convert to azimuth and elevation
     x, y, z = unit_vector
@@ -1538,42 +1563,6 @@ def calculate_dso_coordinates(dso, target_3d):
         use_earth_centric_approx=False
     )
 
-def calculate_text_height_radial(ax, fontsize, radial_position):
-    """Calculate the height of text in radial plot coordinates.
-    
-    Args:
-        ax: matplotlib polar axes
-        fontsize: Font size in points
-        radial_position: Current radial position in plot coordinates
-    
-    Returns:
-        Height in radial units
-    """
-    # Estimate text height: fontsize in points, convert to pixels
-    # 1 point = 4/3 pixels (at 72 DPI), but we'll use a simpler approximation
-    # Text height is roughly fontsize pixels
-    text_height_pixels = fontsize * 1.2  # Add some padding
-    
-    # Get the figure and axes dimensions
-    fig = ax.figure
-    bbox = ax.get_window_extent()
-    width_pixels = bbox.width
-    height_pixels = bbox.height
-    
-    # The plot radius in data coordinates is π/2
-    # The plot radius in pixels is min(width, height) / 2
-    plot_radius_pixels = min(width_pixels, height_pixels) / 2
-    
-    # Convert pixel height to radial units
-    # At the edge (radial = π/2), 1 pixel = (π/2) / plot_radius_pixels
-    # But we need to account for the current radial position
-    # The scale varies with radial position, but for small offsets we can approximate
-    pixel_to_radial = (0.5 * np.pi) / plot_radius_pixels
-    
-    text_height_radial = text_height_pixels * pixel_to_radial
-    
-    return text_height_radial
-
 def calculate_sol_coordinates(target_3d):
     """Calculate azimuth and elevation of Sol (Sun) from target star's perspective.
     
@@ -1582,16 +1571,15 @@ def calculate_sol_coordinates(target_3d):
     
     Returns: (azimuth_rad, elevation_rad, z)
     """
-    # Sol is at origin, so vector from target to Sol is -target_3d
+    # Sol is at origin (0, 0, 0)
+    sol_cart = np.array([0.0, 0.0, 0.0])
     target_cart = target_3d.cartesian.xyz.value  # Shape: (3,)
-    vector_to_sol = -target_cart  # Vector from target to Sol
     
-    # Normalize to get unit direction vector
-    vector_norm = np.linalg.norm(vector_to_sol)
-    if vector_norm > 1e-10:
-        unit_vector = vector_to_sol / vector_norm
-    else:
-        # Target is at origin (Sol itself), return invalid coordinates
+    # Use unified get_relative_coords function
+    _, _, unit_vector = get_relative_coords(target_cart, sol_cart)
+    
+    # Check if target is at origin (Sol itself)
+    if np.linalg.norm(unit_vector) < 1e-10:
         return 0.0, 0.0, 0.0
     
     # Convert to azimuth and elevation
@@ -1624,19 +1612,15 @@ def plot_sol_reference(ax, azimuth_rad, elevation_rad, is_north_hemisphere):
                   alpha=1.0, edgecolors='red', linewidths=3, 
                   marker='*', transform=ax.transData, zorder=10)
         
-        # Add label
+        # Add label using ax.annotate with offset points
         fontsize = 9
-        text_height_radial = calculate_text_height_radial(ax, fontsize, radial)
-        
-        # Position label fully below the point
-        if is_north_hemisphere:
-            label_radial = radial + text_height_radial + 0.01
-        else:
-            label_radial = radial - text_height_radial - 0.01
-        
-        ax.text(azimuth_rad, label_radial, 'Sol', 
-                color='orange', fontsize=fontsize, ha='center', va='top', 
-                weight='bold', transform=ax.transData, zorder=10)
+        ax.annotate('Sol',
+                   xy=(azimuth_rad, radial),
+                   xytext=(0, -10),  # 10 points below the star
+                   textcoords='offset points',
+                   ha='center', va='top',
+                   color='orange', fontsize=fontsize, weight='bold',
+                   transform=ax.transData, zorder=10)
 
 def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, apparent_mag_from_target):
     """Plot a bright star with label on a polar plot hemisphere.
@@ -1665,23 +1649,15 @@ def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, a
         ax.scatter(azimuth_rad, radial, s=point_size, color='yellow', 
                   alpha=0.9, edgecolors='orange', linewidths=1, transform=ax.transData)
         
-        # Calculate text height in radial units
+        # Add label using ax.annotate with offset points
         fontsize = 7
-        text_height_radial = calculate_text_height_radial(ax, fontsize, radial)
-        
-        # Position label fully below the star point
-        # For north hemisphere: increase radial (move toward equator/edge)
-        # For south hemisphere: decrease radial (move toward pole/center)
-        if is_north_hemisphere:
-            # Move down: increase radial by text height plus some spacing
-            label_radial = radial + text_height_radial + 0.01
-        else:
-            # Move down: decrease radial by text height plus some spacing
-            label_radial = radial - text_height_radial - 0.01
-        
-        ax.text(azimuth_rad, label_radial, star['name'], 
-                color='yellow', fontsize=fontsize, ha='center', va='top', weight='bold',
-                transform=ax.transData)
+        ax.annotate(star['name'],
+                   xy=(azimuth_rad, radial),
+                   xytext=(0, -10),  # 10 points below the star
+                   textcoords='offset points',
+                   ha='center', va='top',
+                   color='yellow', fontsize=fontsize, weight='bold',
+                   transform=ax.transData)
 
 def plot_dso_on_hemisphere(ax, dso, azimuth_rad, elevation_rad, is_north_hemisphere, clip_to_equator=False):
     """Plot a deep sky object (nebula, cluster) as an ellipse on a polar plot hemisphere.
@@ -1811,22 +1787,20 @@ def plot_dso_on_hemisphere(ax, dso, azimuth_rad, elevation_rad, is_north_hemisph
         # Add label at center - offset down for magenta (globular), cyan (nebula), and lime (cluster)
         center_in_hemisphere = (is_north_hemisphere and elevation_rad > 0) or (not is_north_hemisphere and elevation_rad < 0)
         if center_in_hemisphere or not clip_to_equator:
-            # Calculate text height in radial units
             fontsize = 8
-            text_height_radial = calculate_text_height_radial(ax, fontsize, radial_center)
-            
+            # Use ax.annotate with offset points for proper label positioning
             # Offset down for magenta (globular clusters), cyan (nebulas), and lime (open clusters)
             if color == 'magenta' or color == 'cyan' or color == 'lime':
-                # Position label below center: move down by half text height plus spacing
-                if is_north_hemisphere:
-                    label_radial = radial_center + text_height_radial * 0.5 + 0.01
-                else:
-                    label_radial = radial_center - text_height_radial * 0.5 - 0.01
+                offset_y = -10  # 10 points below
             else:
-                label_radial = radial_center
-            ax.text(azimuth_rad, label_radial, dso['name'], 
-                    color=color, fontsize=fontsize, ha='center', va='center', weight='bold',
-                    transform=ax.transData)
+                offset_y = 0  # No offset
+            ax.annotate(dso['name'],
+                       xy=(azimuth_rad, radial_center),
+                       xytext=(0, offset_y),
+                       textcoords='offset points',
+                       ha='center', va='top' if offset_y < 0 else 'center',
+                       color=color, fontsize=fontsize, weight='bold',
+                       transform=ax.transData)
 
 def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_refresh=False, star_limit=None, dump_positions=False):
     print(f"--- Processing {target_star_name} ---")
