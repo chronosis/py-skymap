@@ -372,6 +372,66 @@ def ensure_cache_populated(force_refresh=False, star_limit=None):
     # Cache is empty or force_refresh, download from Gaia
     return _download_from_gaia(star_limit, 0)
 
+def _update_progress_bar(pbar, chunk_num, chunk_inserted, duplicates, stars_inserted, star_limit):
+    """Helper function to update progress bar, abstracting HAS_TQDM checks.
+    
+    Args:
+        pbar: Progress bar object (tqdm instance or None)
+        chunk_num: Current chunk number (0-indexed)
+        chunk_inserted: Number of new stars inserted in this chunk
+        duplicates: Number of duplicate stars in this chunk
+        stars_inserted: Total number of stars inserted so far
+        star_limit: Maximum number of stars to download (None = no limit)
+    """
+    if HAS_TQDM and pbar is not None:
+        if star_limit is not None:
+            # Don't update beyond total
+            remaining = max(0, star_limit - pbar.n)
+            if remaining > 0:
+                pbar.update(min(chunk_inserted, remaining))
+        else:
+            pbar.update(chunk_inserted)
+        pbar.set_postfix({
+            'chunk': chunk_num + 1,
+            'new': f'{chunk_inserted:,}', 
+            'dups': f'{duplicates:,}',
+            'total': f'{stars_inserted:,}'
+        })
+    else:
+        if star_limit is not None:
+            percent = (stars_inserted / star_limit) * 100 if star_limit > 0 else 0
+            dup_msg = f", {duplicates:,} duplicates" if duplicates > 0 else ""
+            print(f"  ✓ Chunk {chunk_num + 1}: Inserted {chunk_inserted:,} new stars{dup_msg} (Total: {stars_inserted:,}/{star_limit:,} stars, {percent:.1f}%)")
+        else:
+            dup_msg = f", {duplicates:,} duplicates" if duplicates > 0 else ""
+            print(f"  ✓ Chunk {chunk_num + 1}: Inserted {chunk_inserted:,} new stars{dup_msg} (Total: {stars_inserted:,} stars)")
+        sys.stdout.flush()
+
+def _extract_gaia_data_from_table(table):
+    """Extract data from Astropy table into list of tuples for database insertion.
+    
+    Args:
+        table: Astropy Table with columns: source_id, ra, dec, parallax, phot_g_mean_mag
+    
+    Returns:
+        List of tuples: [(source_id, ra, dec, parallax, phot_g_mean_mag), ...]
+    """
+    # Use list comprehension directly on table rows for cleaner code
+    # Handle both Quantity objects (with .value) and plain arrays
+    def get_value(col):
+        return col.value if hasattr(col, 'value') else col
+    
+    return [
+        (
+            int(row['source_id']),
+            float(get_value(row['ra'])),
+            float(get_value(row['dec'])),
+            float(get_value(row['parallax'])),
+            float(get_value(row['phot_g_mean_mag']))
+        )
+        for row in table
+    ]
+
 def _download_from_gaia(star_limit=None, existing_count=0):
     """Download data from Gaia API and store in SQLite cache.
     
@@ -419,7 +479,9 @@ def _download_from_gaia(star_limit=None, existing_count=0):
             if star_limit is not None and stars_inserted >= star_limit:
                 print(f"\nReached target of {star_limit:,} stars (inserted: {stars_inserted:,})")
                 break
-            if HAS_TQDM:
+            
+            # Update chunk description
+            if HAS_TQDM and pbar is not None:
                 pbar.set_description(f"Downloading chunk {chunk_num + 1}")
             else:
                 print(f"Chunk {chunk_num + 1}: Downloading... (Total so far: {stars_inserted:,} unique stars)")
@@ -434,8 +496,8 @@ def _download_from_gaia(star_limit=None, existing_count=0):
             query = f"""
             SELECT TOP {CHUNK_SIZE} source_id, ra, dec, parallax, phot_g_mean_mag
             FROM gaiadr3.gaia_source
-            WHERE phot_g_mean_mag IS NOT NULL AND phot_rp_mean_mag < 12
-            ORDER BY ra, dec
+            WHERE phot_g_mean_mag IS NOT NULL AND phot_rp_mean_mag < 16
+            ORDER BY random_index
             OFFSET {offset}
             """
             
@@ -478,20 +540,9 @@ def _download_from_gaia(star_limit=None, existing_count=0):
             
             # Insert into SQLite database (using INSERT OR IGNORE to handle duplicates)
             cursor = conn.cursor()
-            chunk_inserted = 0
             
-            # Extract data from astropy Table
-            source_ids = r['source_id'].data
-            ra_values = r['ra'].value if hasattr(r['ra'], 'value') else r['ra']
-            dec_values = r['dec'].value if hasattr(r['dec'], 'value') else r['dec']
-            parallax_values = r['parallax'].value if hasattr(r['parallax'], 'value') else r['parallax']
-            mag_values = r['phot_g_mean_mag'].value if hasattr(r['phot_g_mean_mag'], 'value') else r['phot_g_mean_mag']
-            
-            # Insert in batch
-            data_to_insert = [
-                (int(sid), float(ra), float(dec), float(par), float(mag))
-                for sid, ra, dec, par, mag in zip(source_ids, ra_values, dec_values, parallax_values, mag_values)
-            ]
+            # Extract data from astropy Table using helper function
+            data_to_insert = _extract_gaia_data_from_table(r)
             
             cursor.executemany("""
                 INSERT OR IGNORE INTO gaia_source (source_id, ra, dec, parallax, phot_g_mean_mag)
@@ -505,37 +556,9 @@ def _download_from_gaia(star_limit=None, existing_count=0):
             stars_downloaded += chunk_stars
             stars_inserted += chunk_inserted
             
-            # Update progress bar
+            # Update progress bar using helper function
             duplicates = chunk_stars - chunk_inserted
-            if HAS_TQDM:
-                if star_limit is not None:
-                    # Don't update beyond total
-                    remaining = max(0, star_limit - pbar.n)
-                    if remaining > 0:
-                        pbar.update(min(chunk_inserted, remaining))
-                    pbar.set_postfix({
-                        'chunk': chunk_num + 1,
-                        'new': f'{chunk_inserted:,}', 
-                        'dups': f'{duplicates:,}',
-                        'total': f'{stars_inserted:,}'
-                    })
-                else:
-                    pbar.update(chunk_inserted)
-                    pbar.set_postfix({
-                        'chunk': chunk_num + 1,
-                        'new': f'{chunk_inserted:,}', 
-                        'dups': f'{duplicates:,}',
-                        'total': f'{stars_inserted:,}'
-                    })
-            else:
-                if star_limit is not None:
-                    percent = (stars_inserted / star_limit) * 100 if star_limit > 0 else 0
-                    dup_msg = f", {duplicates:,} duplicates" if duplicates > 0 else ""
-                    print(f"  ✓ Chunk {chunk_num + 1}: Inserted {chunk_inserted:,} new stars{dup_msg} (Total: {stars_inserted:,}/{star_limit:,} stars, {percent:.1f}%)")
-                else:
-                    dup_msg = f", {duplicates:,} duplicates" if duplicates > 0 else ""
-                    print(f"  ✓ Chunk {chunk_num + 1}: Inserted {chunk_inserted:,} new stars{dup_msg} (Total: {stars_inserted:,} stars)")
-                sys.stdout.flush()
+            _update_progress_bar(pbar, chunk_num, chunk_inserted, duplicates, stars_inserted, star_limit)
             
             chunk_num += 1
             offset += CHUNK_SIZE
@@ -1149,6 +1172,61 @@ def plot_galaxy_on_hemisphere(ax, galaxy, azimuth_rad, elevation_rad, is_north_h
                     color='cyan', fontsize=fontsize, ha='center', va='center', weight='bold',
                     transform=ax.transData)
 
+def transform_to_target_frame(target_coord, object_ra_deg, object_dec_deg, object_distance_pc, use_earth_centric_approx=False):
+    """Transform object coordinates to azimuth/elevation from target's perspective.
+    
+    This is a unified utility function that handles the common coordinate transformation
+    logic used by galaxies, stars, and DSOs.
+    
+    Args:
+        target_coord: SkyCoord object representing the target's 3D position
+        object_ra_deg: Right ascension of the object in degrees
+        object_dec_deg: Declination of the object in degrees
+        object_distance_pc: Distance to the object in parsecs
+        use_earth_centric_approx: If True, use Earth-centric direction for very distant objects
+                                 (avoids numerical precision issues when object >> target distance)
+    
+    Returns:
+        (azimuth_rad, elevation_rad, z): Azimuth and elevation in radians, plus z component
+    """
+    target_cart = target_coord.cartesian.xyz.value  # Shape: (3,)
+    target_distance_pc = np.linalg.norm(target_cart)
+    
+    # For very distant objects, use Earth-centric direction to avoid numerical precision issues
+    if use_earth_centric_approx and (object_distance_pc > 100 * target_distance_pc or target_distance_pc < 1e-6):
+        # Object is much farther than target (or target is at origin) - use Earth-centric direction
+        # This is mathematically correct: for D >> d, direction from target ≈ direction from Earth
+        object_icrs = SkyCoord(ra=object_ra_deg*u.deg, dec=object_dec_deg*u.deg, 
+                             distance=1.0*u.pc, frame='icrs')  # Unit distance for direction only
+        object_cart = object_icrs.cartesian.xyz.value  # Shape: (3,) - unit direction vector from Earth
+        unit_vector = object_cart  # Already normalized, direction from Earth = direction from target
+    else:
+        # Calculate proper 3D position with vector subtraction
+        object_icrs = SkyCoord(ra=object_ra_deg*u.deg, dec=object_dec_deg*u.deg, 
+                             distance=object_distance_pc*u.pc, frame='icrs')
+        
+        # Get cartesian coordinates from Earth
+        object_cart = object_icrs.cartesian.xyz.value  # Shape: (3,)
+        
+        # Vector from target to object
+        vector_from_target = object_cart - target_cart  # Shape: (3,)
+        
+        # Normalize to get unit direction vector
+        vector_norm = np.linalg.norm(vector_from_target)
+        if vector_norm > 1e-10:
+            unit_vector = vector_from_target / vector_norm
+        else:
+            # Object and target are at same position (shouldn't happen for known objects)
+            unit_vector = vector_from_target
+    
+    # Convert to azimuth and elevation
+    x, y, z = unit_vector
+    azimuth_rad = np.arctan2(y, x)
+    azimuth_rad = np.mod(azimuth_rad, 2 * np.pi)  # Normalize to [0, 2π)
+    elevation_rad = np.arcsin(np.clip(z, -1.0, 1.0))
+    
+    return azimuth_rad, elevation_rad, z
+
 def calculate_galaxy_coordinates(galaxy, target_3d):
     """Calculate azimuth and elevation of a galaxy from target star's perspective.
     
@@ -1159,30 +1237,13 @@ def calculate_galaxy_coordinates(galaxy, target_3d):
     # Use distance from galaxy data if available, otherwise use large assumed distance
     galaxy_distance_pc = galaxy.get('distance_pc', 100000.0)
     
-    galaxy_icrs = SkyCoord(ra=galaxy['ra_deg']*u.deg, dec=galaxy['dec_deg']*u.deg, 
-                           distance=galaxy_distance_pc*u.pc, frame='icrs')
-    
-    # Get cartesian coordinates from Earth
-    galaxy_cart = galaxy_icrs.cartesian.xyz.value  # Shape: (3,)
-    target_cart = target_3d.cartesian.xyz.value  # Shape: (3,)
-    
-    # Vector from target to galaxy
-    vector_from_target = galaxy_cart - target_cart  # Shape: (3,)
-    
-    # Normalize to get unit direction vector
-    vector_norm = np.linalg.norm(vector_from_target)
-    if vector_norm > 1e-10:
-        unit_vector = vector_from_target / vector_norm
-    else:
-        unit_vector = vector_from_target
-    
-    # Convert to azimuth and elevation
-    x, y, z = unit_vector
-    azimuth_rad = np.arctan2(y, x)
-    azimuth_rad = np.mod(azimuth_rad, 2 * np.pi)  # Normalize to [0, 2π)
-    elevation_rad = np.arcsin(np.clip(z, -1.0, 1.0))
-    
-    return azimuth_rad, elevation_rad, z
+    return transform_to_target_frame(
+        target_3d,
+        galaxy['ra_deg'],
+        galaxy['dec_deg'],
+        galaxy_distance_pc,
+        use_earth_centric_approx=False
+    )
 
 def calculate_star_coordinates(star, target_3d):
     """Calculate azimuth and elevation of a bright star from target star's perspective.
@@ -1201,46 +1262,13 @@ def calculate_star_coordinates(star, target_3d):
         # Very distant stars without parallax measurement
         star_distance_pc = 100000.0
     
-    # Get target distance from Earth
-    target_cart = target_3d.cartesian.xyz.value  # Shape: (3,)
-    target_distance_pc = np.linalg.norm(target_cart)
-    
-    # For stars much farther than the target, the parallax shift is negligible
-    # Use Earth-centric direction directly to avoid numerical precision issues
-    # For nearby stars, calculate proper 3D position with vector subtraction
-    if star_distance_pc > 100 * target_distance_pc or target_distance_pc < 1e-6:
-        # Star is much farther than target (or target is at origin) - use Earth-centric direction
-        # This is mathematically correct: for D >> d, direction from target ≈ direction from Earth
-        star_icrs = SkyCoord(ra=star['ra_deg']*u.deg, dec=star['dec_deg']*u.deg, 
-                            distance=1.0*u.pc, frame='icrs')  # Unit distance for direction only
-        star_cart = star_icrs.cartesian.xyz.value  # Shape: (3,) - unit direction vector from Earth
-        unit_vector = star_cart  # Already normalized, direction from Earth = direction from target
-    else:
-        # Star is relatively close - calculate proper 3D position with parallax correction
-        star_icrs = SkyCoord(ra=star['ra_deg']*u.deg, dec=star['dec_deg']*u.deg, 
-                            distance=star_distance_pc*u.pc, frame='icrs')
-        
-        # Get cartesian coordinates from Earth
-        star_cart = star_icrs.cartesian.xyz.value  # Shape: (3,)
-        
-        # Vector from target to star
-        vector_from_target = star_cart - target_cart  # Shape: (3,)
-        
-        # Normalize to get unit direction vector
-        vector_norm = np.linalg.norm(vector_from_target)
-        if vector_norm > 1e-10:
-            unit_vector = vector_from_target / vector_norm
-        else:
-            # Star and target are at same position (shouldn't happen for known stars)
-            unit_vector = vector_from_target
-    
-    # Convert to azimuth and elevation
-    x, y, z = unit_vector
-    azimuth_rad = np.arctan2(y, x)
-    azimuth_rad = np.mod(azimuth_rad, 2 * np.pi)  # Normalize to [0, 2π)
-    elevation_rad = np.arcsin(np.clip(z, -1.0, 1.0))
-    
-    return azimuth_rad, elevation_rad, z
+    return transform_to_target_frame(
+        target_3d,
+        star['ra_deg'],
+        star['dec_deg'],
+        star_distance_pc,
+        use_earth_centric_approx=True  # Enable special handling for very distant stars
+    )
 
 def calculate_zone_of_avoidance_polygons(target_3d, disk_thickness_pc=2000.0, disk_radius_pc=50000.0, n_azimuth=180, n_elevation=90):
     """Calculate polygonal regions for the zone of avoidance (galactic dust/gas obscuration).
@@ -1509,30 +1537,13 @@ def calculate_dso_coordinates(dso, target_3d):
         else:  # cluster (open cluster)
             dso_distance_pc = 500.0   # Open clusters typically 100-2000 pc
     
-    dso_icrs = SkyCoord(ra=dso['ra_deg']*u.deg, dec=dso['dec_deg']*u.deg, 
-                        distance=dso_distance_pc*u.pc, frame='icrs')
-    
-    # Get cartesian coordinates from Earth
-    dso_cart = dso_icrs.cartesian.xyz.value  # Shape: (3,)
-    target_cart = target_3d.cartesian.xyz.value  # Shape: (3,)
-    
-    # Vector from target to DSO
-    vector_from_target = dso_cart - target_cart  # Shape: (3,)
-    
-    # Normalize to get unit direction vector
-    vector_norm = np.linalg.norm(vector_from_target)
-    if vector_norm > 1e-10:
-        unit_vector = vector_from_target / vector_norm
-    else:
-        unit_vector = vector_from_target
-    
-    # Convert to azimuth and elevation
-    x, y, z = unit_vector
-    azimuth_rad = np.arctan2(y, x)
-    azimuth_rad = np.mod(azimuth_rad, 2 * np.pi)  # Normalize to [0, 2π)
-    elevation_rad = np.arcsin(np.clip(z, -1.0, 1.0))
-    
-    return azimuth_rad, elevation_rad, z
+    return transform_to_target_frame(
+        target_3d,
+        dso['ra_deg'],
+        dso['dec_deg'],
+        dso_distance_pc,
+        use_earth_centric_approx=False
+    )
 
 def calculate_text_height_radial(ax, fontsize, radial_position):
     """Calculate the height of text in radial plot coordinates.
