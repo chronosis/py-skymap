@@ -43,11 +43,7 @@ def init_database(db_path):
             phot_g_mean_mag REAL NOT NULL
         )
     """)
-    
-    # Create index on source_id for faster lookups (though it's already primary key)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_source_id ON gaia_source(source_id)
-    """)
+    # Note: PRIMARY KEY automatically creates a unique index, so no manual index needed
     
     # Table for 3D star positions (used with --dump-positions)
     cursor.execute("""
@@ -609,25 +605,19 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     dec_values = chunk_data['dec'].value if hasattr(chunk_data['dec'], 'value') else chunk_data['dec']
     mag_values = chunk_data['phot_g_mean_mag'].value if hasattr(chunk_data['phot_g_mean_mag'], 'value') else chunk_data['phot_g_mean_mag']
     
+    # Build master mask: combine all initial filtering conditions to minimize memory copies
     # Filter for valid RA/Dec and magnitude (must be finite, but no magnitude limit)
-    valid_coords_mask = (
+    master_mask = (
         np.isfinite(ra_values) & np.isfinite(dec_values) & 
         np.isfinite(mag_values)  # Only check that magnitude is finite, no upper limit
     )
-    if not np.any(valid_coords_mask):
-        return None
-    
-    source_ids = source_ids[valid_coords_mask]
-    parallax_values = parallax_values[valid_coords_mask]
-    ra_values = ra_values[valid_coords_mask]
-    dec_values = dec_values[valid_coords_mask]
-    mag_values = mag_values[valid_coords_mask]
     
     # Handle parallax: use actual distance if valid, otherwise use large assumed distance for background stars
     # Background stars (parallax <= 0 or invalid) are very far away - use 100,000 pc as assumed distance
     ASSUMED_BACKGROUND_DISTANCE_PC = 100000.0
     BRIGHT_BACKGROUND_ABS_MAG_THRESHOLD = 8.0  # Absolute magnitude threshold for fixed background objects
     
+    # Calculate distances (only for stars that pass initial mask)
     valid_parallax_mask = (parallax_values > 0) & np.isfinite(parallax_values)
     d_earth_pc = np.where(
         valid_parallax_mask,
@@ -635,17 +625,19 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
         ASSUMED_BACKGROUND_DISTANCE_PC  # Assumed distance for background stars
     )
     
-    # Filter for reasonable distances (avoid infinite or negative)
-    valid_distance_mask = (d_earth_pc > 0) & np.isfinite(d_earth_pc) & (d_earth_pc < 1e6)  # Max 1M pc
-    if not np.any(valid_distance_mask):
+    # Add distance validation to master mask
+    master_mask = master_mask & (d_earth_pc > 0) & np.isfinite(d_earth_pc) & (d_earth_pc < 1e6)  # Max 1M pc
+    
+    if not np.any(master_mask):
         return None
     
-    source_ids = source_ids[valid_distance_mask]
-    d_earth_pc = d_earth_pc[valid_distance_mask]
-    ra_values = ra_values[valid_distance_mask]
-    dec_values = dec_values[valid_distance_mask]
-    mag_values = mag_values[valid_distance_mask]
-    has_valid_parallax = valid_parallax_mask[valid_distance_mask]
+    # Apply master mask once to get filtered arrays for calculations
+    source_ids = source_ids[master_mask]
+    d_earth_pc = d_earth_pc[master_mask]
+    ra_values = ra_values[master_mask]
+    dec_values = dec_values[master_mask]
+    mag_values = mag_values[master_mask]
+    has_valid_parallax = valid_parallax_mask[master_mask]
     
     # Identify extremely bright background objects (parallax 0, abs mag <= 8)
     # These should be treated as fixed background points (same position regardless of target)
@@ -699,20 +691,22 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
         # Bright background objects are at effectively infinite distance
         d_new_pc[bright_background_mask] = ASSUMED_BACKGROUND_DISTANCE_PC
     
-    # Filter for valid target distances
-    valid_target_distance_mask = (d_new_pc > 0) & np.isfinite(d_new_pc) & (d_new_pc < 1e6)
-    if not np.any(valid_target_distance_mask):
+    # Build second master mask for target distance validation
+    # (we need to do calculations first, then filter)
+    master_mask_2 = (d_new_pc > 0) & np.isfinite(d_new_pc) & (d_new_pc < 1e6)
+    if not np.any(master_mask_2):
         return None
     
-    source_ids = source_ids[valid_target_distance_mask]
-    d_new_pc = d_new_pc[valid_target_distance_mask]
-    vectors_from_target = vectors_from_target[valid_target_distance_mask]
-    ra_values = ra_values[valid_target_distance_mask]
-    dec_values = dec_values[valid_target_distance_mask]
-    mag_values = mag_values[valid_target_distance_mask]
-    d_earth_pc = d_earth_pc[valid_target_distance_mask]
-    has_valid_parallax = has_valid_parallax[valid_target_distance_mask]
-    bright_background_mask = bright_background_mask[valid_target_distance_mask]
+    # Apply second master mask once
+    source_ids = source_ids[master_mask_2]
+    d_new_pc = d_new_pc[master_mask_2]
+    vectors_from_target = vectors_from_target[master_mask_2]
+    ra_values = ra_values[master_mask_2]
+    dec_values = dec_values[master_mask_2]
+    mag_values = mag_values[master_mask_2]
+    d_earth_pc = d_earth_pc[master_mask_2]
+    has_valid_parallax = has_valid_parallax[master_mask_2]
+    bright_background_mask = bright_background_mask[master_mask_2]
     
     # Calculate angular coordinates directly from cartesian vectors
     # Use z-component to determine hemisphere: positive z = north, negative z = south
@@ -737,20 +731,10 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     # elevation = arcsin(z) where z is the normalized z-component
     elevation_rad = np.arcsin(np.clip(z, -1.0, 1.0))  # Clip to avoid numerical errors
     
-    # Verify we got valid coordinates
-    valid_coord_check = (
-        np.isfinite(azimuth_rad) & np.isfinite(elevation_rad) &
-        np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
-    )
-    if not np.any(valid_coord_check):
-        return None
-    
     # Calculate apparent magnitude from target star's perspective
     # Centralized magnitude logic: all stars get proper distance modulus calculation
     # Formula: m_new = M_intrinsic + 5*log10(d_new) - 5
     # where M_intrinsic = m_earth - 5*log10(d_earth) + 5
-    
-    m_new = np.zeros_like(mag_values)
     
     # For all stars (including background), calculate absolute magnitude first
     # Then apply distance modulus for the new observer position (target star)
@@ -770,42 +754,51 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     if len(bright_bg_idx) > 0:
         m_new[bright_bg_idx] = mag_values[bright_bg_idx]
     
+    # Build final master mask: combine coordinate validation, magnitude filter, and final validation
+    # Verify we got valid coordinates
+    valid_coord_check = (
+        np.isfinite(azimuth_rad) & np.isfinite(elevation_rad) &
+        np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    )
+    
     # Filter by apparent magnitude (visible stars) and valid coordinates, unless dumping
     if dump_positions:
-        mask = np.isfinite(m_new) & valid_coord_check
+        final_mask = np.isfinite(m_new) & valid_coord_check
     else:
-        mask = (m_new < 6.5) & np.isfinite(m_new) & valid_coord_check
+        final_mask = (m_new < 6.5) & np.isfinite(m_new) & valid_coord_check
     
-    if not np.any(mask):
+    if not np.any(final_mask):
         return None
     
-    # Extract coordinates and apply mask (x,y,z in pc from vectors_from_target)
-    x_pc = vectors_from_target[:, 0][mask]
-    y_pc = vectors_from_target[:, 1][mask]
-    z_pc = vectors_from_target[:, 2][mask]
-    azimuth_rad_masked = azimuth_rad[mask]
-    elevation_rad_masked = elevation_rad[mask]
-    z_masked = z[mask]  # unit z-component for hemisphere determination
-    m_plot = m_new[mask]
-    source_ids_masked = source_ids[mask]
+    # Apply final mask once to extract all values
+    # Extract coordinates (x,y,z in pc from vectors_from_target)
+    x_pc = vectors_from_target[final_mask, 0]
+    y_pc = vectors_from_target[final_mask, 1]
+    z_pc = vectors_from_target[final_mask, 2]
+    azimuth_rad_final = azimuth_rad[final_mask]
+    elevation_rad_final = elevation_rad[final_mask]
+    z_final = z[final_mask]  # unit z-component for hemisphere determination
+    m_plot = m_new[final_mask]
+    source_ids_final = source_ids[final_mask]
     
-    # Final validation: ensure all values are finite
+    # Final validation: ensure all extracted values are finite (combine into single check)
     valid_final = (
-        np.isfinite(azimuth_rad_masked) & np.isfinite(elevation_rad_masked) &
-        np.isfinite(z_masked) & np.isfinite(m_plot) &
+        np.isfinite(azimuth_rad_final) & np.isfinite(elevation_rad_final) &
+        np.isfinite(z_final) & np.isfinite(m_plot) &
         np.isfinite(x_pc) & np.isfinite(y_pc) & np.isfinite(z_pc)
     )
     if not np.any(valid_final):
         return None
     
+    # Apply final validation mask once
     return {
-        'source_id': source_ids_masked[valid_final],
+        'source_id': source_ids_final[valid_final],
         'x_pc': x_pc[valid_final],
         'y_pc': y_pc[valid_final],
         'z_pc': z_pc[valid_final],
-        'azimuth_rad': azimuth_rad_masked[valid_final],
-        'elevation_rad': elevation_rad_masked[valid_final],
-        'z': z_masked[valid_final],  # unit z: positive = north, negative = south
+        'azimuth_rad': azimuth_rad_final[valid_final],
+        'elevation_rad': elevation_rad_final[valid_final],
+        'z': z_final[valid_final],  # unit z: positive = north, negative = south
         'm_new': m_plot[valid_final]
     }
 
