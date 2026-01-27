@@ -723,34 +723,29 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
         return None
     
     # Calculate apparent magnitude from target star's perspective
-    # For stars with valid parallax: calculate absolute magnitude, then apparent from target
-    # For bright background objects: use apparent magnitude directly (fixed background position)
-    # For other background stars: use apparent magnitude directly (distance change negligible)
+    # Centralized magnitude logic: all stars get proper distance modulus calculation
+    # Formula: m_new = M_intrinsic + 5*log10(d_new) - 5
+    # where M_intrinsic = m_earth - 5*log10(d_earth) + 5
     
     m_new = np.zeros_like(mag_values)
     
-    # Bright background objects: use apparent magnitude directly (they appear at same position)
+    # For all stars (including background), calculate absolute magnitude first
+    # Then apply distance modulus for the new observer position (target star)
+    
+    # Calculate absolute magnitude for all stars
+    # For stars with valid parallax: use actual distance from Earth
+    # For background stars: use assumed background distance
+    M_intrinsic = mag_values - 5 * np.log10(d_earth_pc) + 5
+    
+    # Calculate apparent magnitude from target star's perspective
+    # This applies the distance modulus relative to the new observer position
+    m_new = M_intrinsic + 5 * np.log10(d_new_pc) - 5
+    
+    # Special case: bright background objects are treated as fixed background
+    # They appear at the same position regardless of target, so use Earth's apparent magnitude
     bright_bg_idx = np.where(bright_background_mask)[0]
     if len(bright_bg_idx) > 0:
         m_new[bright_bg_idx] = mag_values[bright_bg_idx]
-    
-    # Stars with valid parallax: calculate absolute magnitude, then apparent from target
-    valid_parallax_idx = np.where(has_valid_parallax)[0]
-    if len(valid_parallax_idx) > 0:
-        # Absolute magnitude from Earth's perspective
-        M_intrinsic = mag_values[valid_parallax_idx] - 5 * np.log10(d_earth_pc[valid_parallax_idx]) + 5
-        # Apparent magnitude from target star's perspective
-        m_new[valid_parallax_idx] = M_intrinsic + 5 * np.log10(d_new_pc[valid_parallax_idx]) - 5
-    
-    # Other background stars (not bright enough to be fixed): use apparent magnitude directly
-    # For very distant stars, we can approximate by using the Earth's apparent magnitude
-    # since the distance difference is negligible compared to their total distance
-    other_background_idx = np.where(~has_valid_parallax & ~bright_background_mask)[0]
-    if len(other_background_idx) > 0:
-        # Background stars are at assumed distance (100k pc), so apparent magnitude from target
-        # is approximately the same as from Earth (both are very far from the star)
-        # Use Earth's apparent magnitude directly
-        m_new[other_background_idx] = mag_values[other_background_idx]
     
     # Filter by apparent magnitude (visible stars) and valid coordinates, unless dumping
     if dump_positions:
@@ -1022,12 +1017,61 @@ def plot_galaxy_on_hemisphere(ax, galaxy, azimuth_rad, elevation_rad, is_north_h
     x_rot = x_local * cos_pa - y_local * sin_pa
     y_rot = x_local * sin_pa + y_local * cos_pa
     
+    # Convert to polar plot coordinates using proper spherical trigonometry
+    # x_rot and y_rot are angular offsets in radians in the local tangent plane
+    # Center point: (azimuth_rad, elevation_rad)
+    # Use spherical trigonometry to compute new (azimuth, elevation) for each point
+    
+    # Convert center to unit vector on sphere
+    center_x = np.cos(elevation_rad) * np.cos(azimuth_rad)
+    center_y = np.cos(elevation_rad) * np.sin(azimuth_rad)
+    center_z = np.sin(elevation_rad)
+    center_vec = np.array([center_x, center_y, center_z])
+    
+    # Create local tangent frame vectors at center
+    # North vector (increasing elevation): derivative w.r.t. elevation
+    north_x = -np.sin(elevation_rad) * np.cos(azimuth_rad)
+    north_y = -np.sin(elevation_rad) * np.sin(azimuth_rad)
+    north_z = np.cos(elevation_rad)
+    north_vec = np.array([north_x, north_y, north_z])
+    
+    # East vector (increasing azimuth): derivative w.r.t. azimuth, scaled by cos(elevation)
+    east_x = -np.sin(azimuth_rad)
+    east_y = np.cos(azimuth_rad)
+    east_z = 0.0
+    east_vec = np.array([east_x, east_y, east_z])
+    
+    # For each ellipse point, compute offset vector in tangent plane
+    # x_rot is offset in north direction, y_rot is offset in east direction
+    # Use small-angle approximation for tangent plane (valid for small angular sizes)
+    # Then project back to unit sphere
+    
+    # Compute offset vectors for all points at once
+    offset_vecs = (x_rot[:, np.newaxis] * north_vec + 
+                   y_rot[:, np.newaxis] * east_vec)
+    
+    # Project to unit sphere: new_vec = normalize(center_vec + offset_vec)
+    new_vecs = center_vec + offset_vecs
+    new_norms = np.linalg.norm(new_vecs, axis=1, keepdims=True)
+    new_norms = np.where(new_norms > 1e-10, new_norms, 1.0)  # Avoid division by zero
+    new_vecs_normalized = new_vecs / new_norms
+    
+    # Convert back to spherical coordinates (azimuth, elevation)
+    new_x = new_vecs_normalized[:, 0]
+    new_y = new_vecs_normalized[:, 1]
+    new_z = new_vecs_normalized[:, 2]
+    
+    new_azimuth = np.arctan2(new_y, new_x)
+    new_azimuth = np.mod(new_azimuth, 2 * np.pi)  # Wrap to [0, 2π)
+    new_elevation = np.arcsin(np.clip(new_z, -1.0, 1.0))
+    
     # Convert to polar plot coordinates
-    # For each point, calculate its (azimuth, radial) position
-    # Approximate: for small offsets, radial change ≈ x_rot, azimuth change ≈ y_rot / radial_center
-    ellipse_radial = radial_center + x_rot
-    ellipse_azimuth = azimuth_rad + y_rot / (radial_center + 1e-6)  # Avoid division by zero
-    ellipse_azimuth = np.mod(ellipse_azimuth, 2 * np.pi)  # Wrap to [0, 2π)
+    if is_north_hemisphere:
+        ellipse_radial = 0.5 * np.pi - new_elevation
+    else:
+        ellipse_radial = 0.5 * np.pi + new_elevation
+    
+    ellipse_azimuth = new_azimuth
     
     # Filter points within valid hemisphere bounds
     if is_north_hemisphere:
@@ -1245,47 +1289,46 @@ def calculate_zone_of_avoidance_polygons(target_3d, disk_thickness_pc=2000.0, di
     y_dir_flat = y_dir.flatten()
     z_dir_flat = z_dir.flatten()
     
-    # Convert direction vectors to galactic frame
-    # First, create SkyCoord objects for these directions
-    # We'll use a large distance to get the direction
-    test_distance = 10000.0 * u.pc
-    target_icrs = target_3d
+    # Compute rotation matrix from ICRS to Galactic frame
+    # Transform ICRS basis vectors (x, y, z) to Galactic frame to get rotation matrix
+    # Use unit distance to get pure direction vectors
+    unit_distance = 1.0 * u.pc
+    icrs_basis = np.eye(3)  # ICRS basis vectors: [1,0,0], [0,1,0], [0,0,1]
     
-    # For each direction, create a point at test_distance and transform to galactic
-    # This gives us the direction in galactic coordinates
+    # Transform each basis vector to Galactic frame
+    galactic_basis = np.zeros((3, 3))
+    for i in range(3):
+        # Create SkyCoord for basis vector in ICRS
+        basis_icrs = SkyCoord(CartesianRepresentation(
+            icrs_basis[i, 0] * unit_distance,
+            icrs_basis[i, 1] * unit_distance,
+            icrs_basis[i, 2] * unit_distance
+        ), frame='icrs')
+        # Transform to Galactic
+        basis_gal = basis_icrs.transform_to('galactic')
+        galactic_basis[i, :] = basis_gal.cartesian.xyz.value
+    
+    # Rotation matrix: columns are Galactic frame basis vectors expressed in ICRS
+    # To transform ICRS -> Galactic, we use the transpose (rows are Galactic basis in ICRS)
+    rotation_matrix = galactic_basis.T  # Shape: (3, 3)
+    
+    # Convert all direction vectors from ICRS to Galactic frame at once (vectorized)
+    dir_vectors_icrs = np.column_stack([x_dir_flat, y_dir_flat, z_dir_flat])  # Shape: (N, 3)
+    dir_vectors_gal = dir_vectors_icrs @ rotation_matrix  # Shape: (N, 3)
+    
+    # Normalize to ensure unit vectors (should already be unit, but ensure numerical precision)
+    dir_norms = np.linalg.norm(dir_vectors_gal, axis=1, keepdims=True)
+    dir_norms = np.where(dir_norms > 1e-10, dir_norms, 1.0)  # Avoid division by zero
+    dir_vectors_gal_unit = dir_vectors_gal / dir_norms  # Shape: (N, 3)
+    
+    # Check intersections for all directions
     intersects_disk = []
     azimuth_result = []
     elevation_result = []
     z_result = []
     
     for i in range(len(x_dir_flat)):
-        # Create a point in the direction from target
-        dir_vector_icrs = np.array([x_dir_flat[i], y_dir_flat[i], z_dir_flat[i]])
-        
-        # Get target position in ICRS cartesian
-        target_cart_icrs = target_icrs.cartesian.xyz.value
-        
-        # Point along direction at test distance
-        test_point_icrs_cart = target_cart_icrs + dir_vector_icrs * test_distance.value
-        
-        # Create SkyCoord for this point
-        test_point_icrs = SkyCoord(CartesianRepresentation(
-            test_point_icrs_cart[0] * u.pc,
-            test_point_icrs_cart[1] * u.pc,
-            test_point_icrs_cart[2] * u.pc
-        ), frame='icrs')
-        
-        # Transform to galactic
-        test_point_gal = test_point_icrs.transform_to('galactic')
-        test_cart_gal = test_point_gal.cartesian.xyz.value
-        
-        # Direction vector in galactic coordinates
-        dir_gal = test_cart_gal - target_cart_gal
-        dir_gal_norm = np.linalg.norm(dir_gal)
-        if dir_gal_norm > 1e-10:
-            dir_gal_unit = dir_gal / dir_gal_norm
-        else:
-            continue
+        dir_gal_unit = dir_vectors_gal_unit[i, :]
         
         # Check if line of sight from target intersects the disk
         # The disk is: |z_gal| < disk_thickness_pc/2 and sqrt(x_gal^2 + y_gal^2) < disk_radius_pc
@@ -1677,10 +1720,61 @@ def plot_dso_on_hemisphere(ax, dso, azimuth_rad, elevation_rad, is_north_hemisph
     x_rot = x_local * cos_pa - y_local * sin_pa
     y_rot = x_local * sin_pa + y_local * cos_pa
     
+    # Convert to polar plot coordinates using proper spherical trigonometry
+    # x_rot and y_rot are angular offsets in radians in the local tangent plane
+    # Center point: (azimuth_rad, elevation_rad)
+    # Use spherical trigonometry to compute new (azimuth, elevation) for each point
+    
+    # Convert center to unit vector on sphere
+    center_x = np.cos(elevation_rad) * np.cos(azimuth_rad)
+    center_y = np.cos(elevation_rad) * np.sin(azimuth_rad)
+    center_z = np.sin(elevation_rad)
+    center_vec = np.array([center_x, center_y, center_z])
+    
+    # Create local tangent frame vectors at center
+    # North vector (increasing elevation): derivative w.r.t. elevation
+    north_x = -np.sin(elevation_rad) * np.cos(azimuth_rad)
+    north_y = -np.sin(elevation_rad) * np.sin(azimuth_rad)
+    north_z = np.cos(elevation_rad)
+    north_vec = np.array([north_x, north_y, north_z])
+    
+    # East vector (increasing azimuth): derivative w.r.t. azimuth, scaled by cos(elevation)
+    east_x = -np.sin(azimuth_rad)
+    east_y = np.cos(azimuth_rad)
+    east_z = 0.0
+    east_vec = np.array([east_x, east_y, east_z])
+    
+    # For each ellipse point, compute offset vector in tangent plane
+    # x_rot is offset in north direction, y_rot is offset in east direction
+    # Use small-angle approximation for tangent plane (valid for small angular sizes)
+    # Then project back to unit sphere
+    
+    # Compute offset vectors for all points at once
+    offset_vecs = (x_rot[:, np.newaxis] * north_vec + 
+                   y_rot[:, np.newaxis] * east_vec)
+    
+    # Project to unit sphere: new_vec = normalize(center_vec + offset_vec)
+    new_vecs = center_vec + offset_vecs
+    new_norms = np.linalg.norm(new_vecs, axis=1, keepdims=True)
+    new_norms = np.where(new_norms > 1e-10, new_norms, 1.0)  # Avoid division by zero
+    new_vecs_normalized = new_vecs / new_norms
+    
+    # Convert back to spherical coordinates (azimuth, elevation)
+    new_x = new_vecs_normalized[:, 0]
+    new_y = new_vecs_normalized[:, 1]
+    new_z = new_vecs_normalized[:, 2]
+    
+    new_azimuth = np.arctan2(new_y, new_x)
+    new_azimuth = np.mod(new_azimuth, 2 * np.pi)  # Wrap to [0, 2π)
+    new_elevation = np.arcsin(np.clip(new_z, -1.0, 1.0))
+    
     # Convert to polar plot coordinates
-    ellipse_radial = radial_center + x_rot
-    ellipse_azimuth = azimuth_rad + y_rot / (radial_center + 1e-6)
-    ellipse_azimuth = np.mod(ellipse_azimuth, 2 * np.pi)
+    if is_north_hemisphere:
+        ellipse_radial = 0.5 * np.pi - new_elevation
+    else:
+        ellipse_radial = 0.5 * np.pi + new_elevation
+    
+    ellipse_azimuth = new_azimuth
     
     # Filter points within valid hemisphere bounds
     if is_north_hemisphere:
