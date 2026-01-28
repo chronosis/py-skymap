@@ -927,7 +927,7 @@ def get_bright_deep_sky_objects():
             "distance_pc": 46.35,
         },  # Hipparcos parallax
         {
-            "name": "Beehive Cluster",
+            "name": "Beehive Cluster (M44)",
             "ra_deg": 130.1,
             "dec_deg": 19.6667,
             "major_axis_deg": 1.5,
@@ -981,17 +981,6 @@ def get_bright_deep_sky_objects():
             "object_type": "cluster",
             "distance_pc": 6100.0,
         },  # ~6.1 kpc
-        {
-            "name": "M44",
-            "ra_deg": 130.1,
-            "dec_deg": 19.6667,
-            "major_axis_deg": 1.5,
-            "minor_axis_deg": 1.5,
-            "position_angle_deg": 0,
-            "apparent_mag": 3.7,
-            "object_type": "cluster",
-            "distance_pc": 187.0,
-        },  # Beehive Cluster, same as above
         {
             "name": "M45",
             "ra_deg": 56.8711,

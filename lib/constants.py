@@ -22,9 +22,12 @@ BACKGROUND_DISTANCE_THRESHOLD_PC: float = 100_000.0  # Stars beyond this are tre
 MAX_DISTANCE_PC: float = 1e6  # General upper sanity bound for distances
 
 # Visibility / plotting thresholds
-VISIBLE_MAG_LIMIT: float = 10.5  # Faintest stars we render in the general field
+VISIBLE_MAG_LIMIT: float = 11.5  # Faintest stars we render in the general field
+VISIBLE_MAG_TRANSPARENCY_LIMIT: float = 7.0  # Stars brighter than this are fully opaque
 
 # Point size scaling for general star field
-STAR_POINT_MIN_SIZE: float = 1.5
-STAR_POINT_MAX_SIZE: float = 16.0
+STAR_POINT_MIN_SIZE: float = 3.0
+STAR_POINT_MAX_SIZE: float = 132.0
+STAR_POINT_MIN_ALPHA: float = 0.1
+STAR_POINT_MAX_ALPHA: float = 0.9
 

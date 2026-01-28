@@ -24,8 +24,11 @@ from lib.constants import (
     BACKGROUND_DISTANCE_THRESHOLD_PC,
     MAX_DISTANCE_PC,
     VISIBLE_MAG_LIMIT,
+    VISIBLE_MAG_TRANSPARENCY_LIMIT,
     STAR_POINT_MIN_SIZE,
     STAR_POINT_MAX_SIZE,
+    STAR_POINT_MIN_ALPHA,
+    STAR_POINT_MAX_ALPHA,
 )
 from lib.sqlite_helper import (
     init_database as _sqlite_init_database,
@@ -59,7 +62,6 @@ def bp_rp_to_rgb(bp_rp, alpha=0.3):
 def init_database(db_path):
     """Initialize or return SQLite database connection via shared helper."""
     return _sqlite_init_database(db_path)
-
 
 def get_star_count(db_path):
     """Get the number of stars in the database via shared helper."""
@@ -1099,14 +1101,19 @@ def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, a
     # Only plot if in this hemisphere
     if (is_north_hemisphere and elevation_rad > 0) or (not is_north_hemisphere and elevation_rad < 0):
         # Calculate point size based on apparent magnitude from target
-        # Use magnitude_brightest=6.5 to match the magnitude filter (m_new < 6.5)
-        point_size = calculate_point_size_by_magnitude(apparent_mag_from_target, min_size=0, max_size=16, magnitude_brightest=10.5)
+        # Use same size range as background stars for consistency
+        point_size = calculate_point_size_by_magnitude(
+            apparent_mag_from_target,
+            min_size=STAR_POINT_MIN_SIZE,
+            max_size=STAR_POINT_MAX_SIZE,
+            magnitude_brightest=VISIBLE_MAG_LIMIT
+        )
         
         # Only plot if point size is greater than 0
         if point_size > 0:
-            # Plot star as a point
+            # Plot star as a point (rendered on top of background stars)
             ax.scatter(azimuth_rad, radial, s=point_size, color='yellow', 
-                      alpha=0.9, edgecolors='orange', linewidths=1, transform=ax.transData)
+                      alpha=0.9, edgecolors='orange', linewidths=1, transform=ax.transData, zorder=10)
         
         # Add label using ax.annotate with offset points
         fontsize = 7
@@ -1429,8 +1436,27 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     print(f"  Stars with z < 0: {np.sum(z < 0):,}")
     print(f"  Stars with z = 0: {np.sum(z == 0):,}")
     
-    # Convert BP-RP color index to RGB colors (faint, with 30% transparency)
-    star_colors = bp_rp_to_rgb(bp_rp, alpha=1.0)
+    # Convert BP-RP color index to RGB colors with magnitude-based transparency.
+    # Stars brighter than VISIBLE_MAG_TRANSPARENCY_LIMIT are fully opaque.
+    # Stars at VISIBLE_MAG_LIMIT are rendered at 10% opacity (very faint).
+    alpha = np.ones_like(m_plot, dtype=float)
+    bright_mask = m_plot <= VISIBLE_MAG_TRANSPARENCY_LIMIT
+    faint_mask = m_plot >= VISIBLE_MAG_LIMIT
+    mid_mask = (~bright_mask) & (~faint_mask)
+
+    alpha[bright_mask] = STAR_POINT_MAX_ALPHA
+    alpha[faint_mask] = STAR_POINT_MIN_ALPHA
+    if np.any(mid_mask):
+        # Linearly interpolate opacity between the two thresholds
+        span = VISIBLE_MAG_LIMIT - VISIBLE_MAG_TRANSPARENCY_LIMIT
+        frac = (m_plot[mid_mask] - VISIBLE_MAG_TRANSPARENCY_LIMIT) / span
+        alpha[mid_mask] = STAR_POINT_MAX_ALPHA - frac * (STAR_POINT_MAX_ALPHA - STAR_POINT_MIN_ALPHA)
+    
+    # Ensure alpha is fully materialized (not a view) to avoid issues with lazy evaluation.
+    # This fixes a bug where increasing VISIBLE_MAG_LIMIT caused fewer stars to be displayed.
+    alpha = np.asarray(alpha, dtype=float).copy()
+
+    star_colors = bp_rp_to_rgb(bp_rp, alpha=alpha)
     
     del all_azimuth_rad, all_elevation_rad, all_z, all_m_plot, all_bp_rp
     
@@ -1441,13 +1467,30 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     
     # 5. Plotting Northern and Southern Hemispheres based on z-component
     # Scaling for stars
-    # Use magnitude_brightest=VISIBLE_MAG_LIMIT to match the magnitude filter (m_new < VISIBLE_MAG_LIMIT)
-    point_sizes = calculate_point_size_by_magnitude(
-        m_plot,
-        min_size=STAR_POINT_MIN_SIZE,
-        max_size=STAR_POINT_MAX_SIZE,
-        magnitude_brightest=VISIBLE_MAG_LIMIT,
-    )
+    #
+    # IMPORTANT:
+    # The shared helper `calculate_point_size_by_magnitude` is used for bright / labelled
+    # objects (fixed stars, Sol, DSOs). For the dense star field, we avoid any logic
+    # that can ever return size 0 for in-range magnitudes, because:
+    # - m_plot has already been filtered by `m_new < VISIBLE_MAG_LIMIT`
+    # - runtime logs showed that, for higher VISIBLE_MAG_LIMIT values, nearly all
+    #   mid-range stars were being assigned size 0, effectively removing them.
+    #
+    # Here we therefore apply a simple, explicit piecewise mapping:
+    # - 0 <= mag <= 7.0  : full dynamic range from STAR_POINT_MAX_SIZE down to MIN
+    # - mag > 7.0       : clamped to STAR_POINT_MIN_SIZE (always > 0)
+    # This guarantees that *no* star that passes the magnitude filter will ever have
+    # a zero point size, independent of VISIBLE_MAG_LIMIT.
+    mag = np.asarray(m_plot, dtype=float)
+    point_sizes = np.full_like(mag, STAR_POINT_MIN_SIZE, dtype=float)
+
+    mag_threshold = 7.0
+    bright_mask = mag <= mag_threshold
+    if np.any(bright_mask):
+        bright_mag = np.clip(mag[bright_mask], 0.0, mag_threshold)
+        bright_mag_norm = bright_mag / mag_threshold  # 0 .. 1
+        size_range = STAR_POINT_MAX_SIZE - STAR_POINT_MIN_SIZE
+        point_sizes[bright_mask] = STAR_POINT_MAX_SIZE - bright_mag_norm * size_range
 
     # Get bright galaxies, stars, and deep sky objects
     galaxies = get_bright_galaxies()
