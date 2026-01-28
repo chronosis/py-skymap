@@ -477,6 +477,9 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     if not np.any(valid_final):
         return None
     
+    # Distance from target (for draw order: farthest first)
+    d_new_pc_final = d_new_pc[final_mask][valid_final]
+    
     # Apply final validation mask once
     return {
         'source_id': source_ids_final[valid_final],
@@ -487,7 +490,8 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
         'elevation_rad': elevation_rad_final[valid_final],
         'z': z_final[valid_final],  # unit z: positive = north, negative = south
         'm_new': m_plot[valid_final],
-        'bp_rp': bp_rp_final[valid_final]
+        'bp_rp': bp_rp_final[valid_final],
+        'distance_pc': d_new_pc_final,
     }
 
 def get_bright_galaxies():
@@ -1329,6 +1333,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     all_z = []
     all_m_plot = []
     all_bp_rp = []
+    all_distance_pc = []
     
     total_stars = num_stars
     
@@ -1356,6 +1361,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                 all_z.append(result['z'])
                 all_m_plot.append(result['m_new'])
                 all_bp_rp.append(result['bp_rp'])
+                all_distance_pc.append(result['distance_pc'])
                 total_valid = sum(len(x) for x in all_azimuth_rad)
                 
                 if dump_positions:
@@ -1405,6 +1411,16 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     z = np.concatenate(all_z)
     m_plot = np.concatenate(all_m_plot)
     bp_rp = np.concatenate(all_bp_rp)
+    distance_pc = np.concatenate(all_distance_pc)
+    
+    # Draw star field in distance order: farthest first so closer stars render on top
+    sort_idx = np.argsort(distance_pc)[::-1]
+    azimuth_rad = azimuth_rad[sort_idx]
+    elevation_rad = elevation_rad[sort_idx]
+    z = z[sort_idx]
+    m_plot = m_plot[sort_idx]
+    bp_rp = bp_rp[sort_idx]
+    del distance_pc, all_distance_pc, sort_idx
     
     print(f"  Azimuth range: {np.degrees(np.min(azimuth_rad)):.1f}° to {np.degrees(np.max(azimuth_rad)):.1f}°")
     print(f"  Elevation range: {np.degrees(np.min(elevation_rad)):.1f}° to {np.degrees(np.max(elevation_rad)):.1f}°")
