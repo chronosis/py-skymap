@@ -1739,6 +1739,63 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     else:
         print(f"Warning: No stars in south hemisphere (z < 0)")
 
+    # East / West hemispheres by azimuth, composited into a single image:
+    # East:   0°  <= azimuth < 180°
+    # West: 180° <= azimuth < 360°
+    # Use a full-sky polar projection (north pole at center, south pole at edge),
+    # then crop by azimuth range.
+    radial_full = 0.5 * np.pi - elevation_rad
+
+    east_mask = (azimuth_rad >= 0.0) & (azimuth_rad < np.pi) & valid_size_mask
+    west_mask = (azimuth_rad >= np.pi) & (azimuth_rad < 2 * np.pi) & valid_size_mask
+
+    if np.any(east_mask) or np.any(west_mask):
+        fig_east_west = plt.figure(figsize=(24, 24), facecolor='#000005')
+        ax_ew = fig_east_west.add_subplot(111, projection='polar')
+
+        # Plot east stars
+        if np.any(east_mask):
+            if star_colors.ndim == 2:
+                colors_east = star_colors[east_mask]
+            else:
+                colors_east = star_colors
+
+            ax_ew.scatter(
+                azimuth_rad[east_mask],
+                radial_full[east_mask],
+                s=point_sizes[east_mask],
+                c=colors_east,
+                edgecolors='none',
+            )
+
+        # Plot west stars
+        if np.any(west_mask):
+            if star_colors.ndim == 2:
+                colors_west = star_colors[west_mask]
+            else:
+                colors_west = star_colors
+
+            ax_ew.scatter(
+                azimuth_rad[west_mask],
+                radial_full[west_mask],
+                s=point_sizes[west_mask],
+                c=colors_west,
+                edgecolors='none',
+            )
+
+        ax_ew.set_title(f"East / West Hemispheres\nFrom {target_star_name}", color='white', pad=20)
+        ax_ew.set_facecolor('#000005')
+        ax_ew.set_yticklabels([])  # Hide radial labels
+        ax_ew.set_xticklabels(['0°', '45°', '90°', '135°', '180°', '225°', '270°', '315°'], color='gray', fontsize=8)
+        ax_ew.grid(True, color='gray', alpha=0.2)
+        plt.tight_layout()
+        ew_image_path = IMAGES_DIR / f"{target_star_name}_east_west_hemispheres.png"
+        plt.savefig(ew_image_path, facecolor='#000005', bbox_inches='tight', dpi=150)
+        plt.close(fig_east_west)
+        print(f"Saved: {ew_image_path} ({np.sum(east_mask | west_mask):,} stars)")
+    else:
+        print("Warning: No stars in east or west hemisphere (0°–360° azimuth)")
+
 def main():
     """Main entry point for the script."""
     # Parse command-line arguments
