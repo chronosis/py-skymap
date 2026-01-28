@@ -12,121 +12,63 @@ from astropy import units as u
 from astroquery.gaia import Gaia
 from astropy.table import Table
 
-try:
-    from tqdm import tqdm
-    HAS_TQDM = True
-except ImportError:
-    HAS_TQDM = False
-    # Fallback progress function if tqdm not available
-    def tqdm(iterable, **kwargs):
-        return iterable
+from lib.progress import HAS_TQDM, tqdm
 
-CACHE_DB = Path("gaia_cache/gaia_cache.db")
-IMAGES_DIR = Path("images")
-CHUNK_SIZE = 500000  # Stars per chunk (reduced to avoid timeouts)
-DEFAULT_STAR_LIMIT = 50000  # Default number of stars to download
+from lib.constants import (
+    CACHE_DB,
+    IMAGES_DIR,
+    CHUNK_SIZE,
+    DEFAULT_STAR_LIMIT,
+    ASSUMED_BACKGROUND_DISTANCE_PC,
+    BRIGHT_BACKGROUND_ABS_MAG_THRESHOLD,
+    BACKGROUND_DISTANCE_THRESHOLD_PC,
+    MAX_DISTANCE_PC,
+    VISIBLE_MAG_LIMIT,
+    STAR_POINT_MIN_SIZE,
+    STAR_POINT_MAX_SIZE,
+)
+from lib.sqlite_helper import (
+    init_database as _sqlite_init_database,
+    get_star_count as _sqlite_get_star_count,
+    get_target_star_from_cache as _sqlite_get_target_star_from_cache,
+    cache_target_star as _sqlite_cache_target_star,
+    clear_star_positions_for_target as _sqlite_clear_star_positions_for_target,
+    insert_star_positions_batch as _sqlite_insert_star_positions_batch,
+    load_stars_from_cache as _sqlite_load_stars_from_cache,
+    check_sky_coverage_bias as _sqlite_check_sky_coverage_bias,
+)
+from lib.math3d import (
+    get_relative_coords as _math_get_relative_coords,
+    transform_to_target_frame as _math_transform_to_target_frame,
+)
+from lib.plot_helper import (
+    bp_rp_to_rgb as _plot_bp_rp_to_rgb,
+    calculate_point_size_by_magnitude as _plot_calculate_point_size_by_magnitude,
+)
+from lib.star_data import (
+    get_bright_galaxies as _stardata_get_bright_galaxies,
+    get_bright_stars as _stardata_get_bright_stars,
+    get_bright_deep_sky_objects as _stardata_get_bright_deep_sky_objects,
+)
+
+
+def bp_rp_to_rgb(bp_rp, alpha=0.3):
+    """Delegate to shared color helper."""
+    return _plot_bp_rp_to_rgb(bp_rp, alpha=alpha)
 
 def init_database(db_path):
-    """Initialize SQLite database with gaia_source table."""
-    # Ensure the directory exists
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-    
-    # Create table with source_id as primary key
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS gaia_source (
-            source_id INTEGER PRIMARY KEY,
-            ra REAL NOT NULL,
-            dec REAL NOT NULL,
-            parallax REAL NOT NULL,
-            phot_g_mean_mag REAL NOT NULL
-        )
-    """)
-    # Note: PRIMARY KEY automatically creates a unique index, so no manual index needed
-    
-    # Table for 3D star positions (used with --dump-positions)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS star_positions_3d (
-            source_id INTEGER NOT NULL,
-            target_star_name TEXT NOT NULL,
-            x_pc REAL NOT NULL,
-            y_pc REAL NOT NULL,
-            z_pc REAL NOT NULL,
-            azimuth_rad REAL NOT NULL,
-            elevation_rad REAL NOT NULL,
-            magnitude REAL NOT NULL,
-            PRIMARY KEY (source_id, target_star_name)
-        )
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_star_positions_target ON star_positions_3d(target_star_name)
-    """)
-    
-    conn.commit()
-    return conn
+    """Initialize or return SQLite database connection via shared helper."""
+    return _sqlite_init_database(db_path)
+
 
 def get_star_count(db_path):
-    """Get the number of stars in the database."""
-    if not db_path.exists():
-        return 0
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM gaia_source")
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
+    """Get the number of stars in the database via shared helper."""
+    return _sqlite_get_star_count(db_path)
+
 
 def get_target_star_from_cache(db_path, target_star_name):
-    """Check if target star is in cache by searching for matching coordinates.
-    
-    Uses Simbad to get approximate coordinates, then searches cache for stars
-    within 1 arcminute. Returns None if not found in cache.
-    """
-    if not db_path.exists():
-        return None
-    
-    try:
-        # Get approximate coordinates from Simbad
-        simbad_coord = SkyCoord.from_name(target_star_name)
-        ra_approx = simbad_coord.ra.deg
-        dec_approx = simbad_coord.dec.deg
-        
-        # Search in cache for stars near this position (within 1 arcminute = 0.0167 degrees)
-        # Use a simple distance calculation: sqrt((ra_diff)^2 + (dec_diff)^2)
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        
-        # Search radius in degrees (1 arcminute)
-        search_radius_deg = 0.0167
-        
-        # Find stars within search radius, ordered by distance
-        cursor.execute("""
-            SELECT source_id, ra, dec, parallax, phot_g_mean_mag,
-                   SQRT(POWER(ra - ?, 2) + POWER(dec - ?, 2)) AS distance
-            FROM gaia_source
-            WHERE ABS(ra - ?) < ? AND ABS(dec - ?) < ?
-            ORDER BY distance
-            LIMIT 1
-        """, (ra_approx, dec_approx, ra_approx, search_radius_deg, dec_approx, search_radius_deg))
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            distance_deg = row[5]
-            print(f"  Found star in cache at distance {distance_deg * 3600:.1f} arcseconds")
-            return {
-                'source_id': row[0],
-                'ra': row[1],
-                'dec': row[2],
-                'parallax': row[3],
-                'phot_g_mean_mag': row[4]
-            }
-    except Exception as e:
-        print(f"  Warning: Could not search cache for target star: {e}")
-    
-    return None
+    """Check if target star is in cache via shared helper."""
+    return _sqlite_get_target_star_from_cache(db_path, target_star_name)
 
 def get_target_star_from_gaia(target_star_name):
     """Query Gaia database for target star by name using crossmatch.
@@ -186,108 +128,23 @@ def get_target_star_from_gaia(target_star_name):
         return None
 
 def cache_target_star(db_path, target_data):
-    """Cache the target star in the SQLite database."""
-    if target_data is None:
-        return False
-    
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-    
-    try:
-        # Use INSERT OR IGNORE to avoid duplicates
-        cursor.execute("""
-            INSERT OR IGNORE INTO gaia_source (source_id, ra, dec, parallax, phot_g_mean_mag)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            target_data['source_id'],
-            target_data['ra'],
-            target_data['dec'],
-            target_data['parallax'],
-            target_data['phot_g_mean_mag']
-        ))
-        conn.commit()
-        cached = cursor.rowcount > 0
-        conn.close()
-        return cached
-    except Exception as e:
-        print(f"  Error caching target star: {e}")
-        conn.close()
-        return False
+    """Cache the target star via shared SQLite helper."""
+    return _sqlite_cache_target_star(db_path, target_data)
+
 
 def clear_star_positions_for_target(db_path, target_star_name):
-    """Remove all star_positions_3d rows for the given target."""
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM star_positions_3d WHERE target_star_name = ?", (target_star_name,))
-    deleted = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return deleted
+    """Remove all star_positions_3d rows for the given target via shared helper."""
+    return _sqlite_clear_star_positions_for_target(db_path, target_star_name)
+
 
 def insert_star_positions_batch(db_path, target_star_name, rows):
-    """Insert a batch of (source_id, x_pc, y_pc, z_pc, azimuth_rad, elevation_rad, magnitude)."""
-    if not rows:
-        return 0
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-    data = [
-        (r[0], target_star_name, r[1], r[2], r[3], r[4], r[5], r[6])
-        for r in rows
-    ]
-    cursor.executemany("""
-        INSERT OR REPLACE INTO star_positions_3d
-        (source_id, target_star_name, x_pc, y_pc, z_pc, azimuth_rad, elevation_rad, magnitude)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, data)
-    n = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return n
+    """Insert a batch of positions via shared SQLite helper."""
+    return _sqlite_insert_star_positions_batch(db_path, target_star_name, rows)
+
 
 def load_stars_from_cache(db_path, limit=None, offset=0):
-    """Load stars from SQLite cache.
-    This function ONLY reads from the cache, never queries Gaia."""
-    if not db_path.exists():
-        raise RuntimeError(f"Cache database {db_path} does not exist. Run ensure_cache_populated() first.")
-    
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-    
-    if limit is not None:
-        cursor.execute("""
-            SELECT source_id, ra, dec, parallax, phot_g_mean_mag
-            FROM gaia_source
-            ORDER BY source_id
-            LIMIT ? OFFSET ?
-        """, (limit, offset))
-    else:
-        cursor.execute("""
-            SELECT source_id, ra, dec, parallax, phot_g_mean_mag
-            FROM gaia_source
-            ORDER BY source_id
-            LIMIT ? OFFSET ?
-        """, (1000000, offset))  # Large limit if none specified
-    
-    rows = cursor.fetchall()
-    conn.close()
-    
-    if not rows:
-        return None
-    
-    # Convert to astropy Table
-    source_ids = [row[0] for row in rows]
-    ra_values = [row[1] for row in rows]
-    dec_values = [row[2] for row in rows]
-    parallax_values = [row[3] for row in rows]
-    mag_values = [row[4] for row in rows]
-    
-    return Table({
-        'source_id': source_ids,
-        'ra': ra_values * u.deg,
-        'dec': dec_values * u.deg,
-        'parallax': parallax_values * u.mas,
-        'phot_g_mean_mag': mag_values
-    })
+    """Load stars from SQLite cache via shared helper (no Gaia queries)."""
+    return _sqlite_load_stars_from_cache(db_path, limit=limit, offset=offset)
 
 def check_sky_coverage_bias(db_path):
     """Check if database has biased sky coverage (e.g., only northern hemisphere).
@@ -403,191 +260,16 @@ def _update_progress_bar(pbar, chunk_num, chunk_inserted, duplicates, stars_inse
             print(f"  ✓ Chunk {chunk_num + 1}: Inserted {chunk_inserted:,} new stars{dup_msg} (Total: {stars_inserted:,} stars)")
         sys.stdout.flush()
 
-def _extract_gaia_data_from_table(table):
-    """Extract data from Astropy table into list of tuples for database insertion.
-    
-    Args:
-        table: Astropy Table with columns: source_id, ra, dec, parallax, phot_g_mean_mag
-    
-    Returns:
-        List of tuples: [(source_id, ra, dec, parallax, phot_g_mean_mag), ...]
-    """
-    # Use list comprehension directly on table rows for cleaner code
-    # Handle both Quantity objects (with .value) and plain arrays
-    def get_value(col):
-        return col.value if hasattr(col, 'value') else col
-    
-    return [
-        (
-            int(row['source_id']),
-            float(get_value(row['ra'])),
-            float(get_value(row['dec'])),
-            float(get_value(row['parallax'])),
-            float(get_value(row['phot_g_mean_mag']))
-        )
-        for row in table
-    ]
-
 def _download_from_gaia(star_limit=None, existing_count=0):
-    """Download data from Gaia API and store in SQLite cache.
-    
-    ⚠️ IMPORTANT: This is the ONLY function that queries Gaia API directly.
-    All other operations (processing, filtering, plotting) use the SQLite cache.
-    
-    Args:
-        star_limit: Maximum number of stars to download (None = no limit)
-        existing_count: Number of stars already in cache (for progress tracking)
-    
-    Returns:
-        Total number of unique stars in cache after download
-    """
-    conn = init_database(CACHE_DB)
-    
-    if star_limit is not None:
-        print(f"Downloading Gaia DR3 data (limit: {star_limit:,} stars)...")
-    else:
-        print("Downloading Gaia DR3 data...")
-        print("(Skipping count query - will download until no more results)")
-    
-    chunk_num = 0
-    offset = 0
-    stars_downloaded = 0
-    stars_inserted = existing_count  # Track actually inserted (excluding duplicates), start with existing
-    
-    # Create progress bar
-    if HAS_TQDM:
-        if star_limit is not None:
-            pbar = tqdm(total=star_limit, initial=existing_count, unit='stars', desc='Downloading', unit_scale=True)
-        else:
-            pbar = tqdm(initial=existing_count, unit='stars', desc='Downloading', unit_scale=True)
-    else:
-        pbar = None
-        if star_limit is not None:
-            percent = (stars_inserted / star_limit) * 100 if star_limit > 0 else 0
-            print(f"Progress: {stars_inserted:,}/{star_limit:,} stars in cache ({percent:.1f}%)")
-        else:
-            print(f"Progress: {stars_inserted:,} stars in cache")
-        sys.stdout.flush()
-    
-    try:
-        while True:
-            # Check if we've reached the star limit
-            if star_limit is not None and stars_inserted >= star_limit:
-                print(f"\nReached target of {star_limit:,} stars (inserted: {stars_inserted:,})")
-                break
-            
-            # Update chunk description
-            if HAS_TQDM and pbar is not None:
-                pbar.set_description(f"Downloading chunk {chunk_num + 1}")
-            else:
-                print(f"Chunk {chunk_num + 1}: Downloading... (Total so far: {stars_inserted:,} unique stars)")
-                sys.stdout.flush()
-            
-            # Gaia TAP uses TOP (not LIMIT). Paginate via OFFSET.
-            # CRITICAL: source_id encodes HEALPix level-8 pixels (spatial regions).
-            # Ordering by source_id directly would only download stars from certain
-            # sky regions (e.g., mostly northern hemisphere).
-            # We order by ra, dec to get uniform sky coverage across all declinations.
-            # Filter by phot_rp_mean_mag < 12 to get brighter stars and reduce query size.
-            query = f"""
-            SELECT TOP {CHUNK_SIZE} source_id, ra, dec, parallax, phot_g_mean_mag
-            FROM gaiadr3.gaia_source
-            WHERE phot_g_mean_mag IS NOT NULL AND phot_rp_mean_mag < 16
-            ORDER BY random_index
-            OFFSET {offset}
-            """
-            
-            # Retry logic for timeouts
-            max_retries = 3
-            retry_count = 0
-            r = None
-            
-            while retry_count < max_retries:
-                try:
-                    job = Gaia.launch_job(query)
-                    r = job.get_results()
-                    break  # Success, exit retry loop
-                except Exception as e:
-                    retry_count += 1
-                    if "timeout" in str(e).lower() or "408" in str(e) or retry_count >= max_retries:
-                        if retry_count >= max_retries:
-                            print(f"\n  ✗ Failed after {max_retries} retries. Error: {e}")
-                            raise
-                        else:
-                            wait_time = retry_count * 5  # Exponential backoff
-                            print(f"  ⚠ Timeout on chunk {chunk_num + 1}, retrying in {wait_time}s... (attempt {retry_count}/{max_retries})")
-                            sys.stdout.flush()
-                            time.sleep(wait_time)
-                    else:
-                        raise  # Re-raise if it's not a timeout
-            
-            # If we got fewer results than requested, we've reached the end
-            if len(r) == 0:
-                break
-            
-            # Check if this chunk would exceed the limit
-            if star_limit is not None:
-                remaining = star_limit - stars_inserted
-                if remaining <= 0:
-                    break
-                # If this chunk would exceed the limit, truncate it
-                if len(r) > remaining:
-                    r = r[:remaining]
-            
-            # Insert into SQLite database (using INSERT OR IGNORE to handle duplicates)
-            cursor = conn.cursor()
-            
-            # Extract data from astropy Table using helper function
-            data_to_insert = _extract_gaia_data_from_table(r)
-            
-            cursor.executemany("""
-                INSERT OR IGNORE INTO gaia_source (source_id, ra, dec, parallax, phot_g_mean_mag)
-                VALUES (?, ?, ?, ?, ?)
-            """, data_to_insert)
-            
-            chunk_inserted = cursor.rowcount
-            conn.commit()
-            
-            chunk_stars = len(r)
-            stars_downloaded += chunk_stars
-            stars_inserted += chunk_inserted
-            
-            # Update progress bar using helper function
-            duplicates = chunk_stars - chunk_inserted
-            _update_progress_bar(pbar, chunk_num, chunk_inserted, duplicates, stars_inserted, star_limit)
-            
-            chunk_num += 1
-            offset += CHUNK_SIZE
-            
-            # Check if we've reached the limit after this chunk
-            if star_limit is not None and stars_inserted >= star_limit:
-                break
-            
-            # If we got fewer results than requested, we've reached the end
-            if chunk_stars < CHUNK_SIZE:
-                break
-            
-            # Clear memory
-            del r, job, cursor
-    except KeyboardInterrupt:
-        print("\n\nDownload interrupted by user.")
-        conn.close()
-        if HAS_TQDM and pbar is not None:
-            pbar.close()
-        raise
-    except Exception as e:
-        print(f"\n\nError during download: {e}")
-        conn.close()
-        if HAS_TQDM and pbar is not None:
-            pbar.close()
-        raise
-    finally:
-        conn.close()
-        if HAS_TQDM and pbar is not None:
-            pbar.close()
-    
-    print(f"\nDownload complete. Processed {chunk_num} chunks ({stars_inserted:,} unique stars inserted, {stars_downloaded:,} total downloaded).")
-    return stars_inserted
+    """Download data from Gaia API and store in SQLite cache via shared helper."""
+    from lib.gaia_client import _download_from_gaia as _gaia_download_from_gaia
+
+    return _gaia_download_from_gaia(
+        cache_db=CACHE_DB,
+        chunk_size=CHUNK_SIZE,
+        star_limit=star_limit,
+        existing_count=existing_count,
+    )
 
 def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     """Process a chunk of stars and return valid stars for plotting or dumping.
@@ -604,6 +286,7 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     ra_values = chunk_data['ra'].value if hasattr(chunk_data['ra'], 'value') else chunk_data['ra']
     dec_values = chunk_data['dec'].value if hasattr(chunk_data['dec'], 'value') else chunk_data['dec']
     mag_values = chunk_data['phot_g_mean_mag'].value if hasattr(chunk_data['phot_g_mean_mag'], 'value') else chunk_data['phot_g_mean_mag']
+    bp_rp_values = chunk_data['bp_rp'] if 'bp_rp' in chunk_data.colnames else np.full(len(source_ids), np.nan)
     
     # Build master mask: combine all initial filtering conditions to minimize memory copies
     # Filter for valid RA/Dec and magnitude (must be finite, but no magnitude limit)
@@ -613,10 +296,8 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     )
     
     # Handle parallax: use actual distance if valid, otherwise use large assumed distance for background stars
-    # Background stars (parallax <= 0 or invalid) are very far away - use 100,000 pc as assumed distance
-    ASSUMED_BACKGROUND_DISTANCE_PC = 100000.0
-    BRIGHT_BACKGROUND_ABS_MAG_THRESHOLD = 8.0  # Absolute magnitude threshold for fixed background objects
-    
+    # Background stars (parallax <= 0 or invalid) are very far away - use ASSUMED_BACKGROUND_DISTANCE_PC
+    # This ensures only truly distant objects (beyond the Milky Way) are treated as fixed background
     # Calculate distances (only for stars that pass initial mask)
     valid_parallax_mask = (parallax_values > 0) & np.isfinite(parallax_values)
     d_earth_pc = np.where(
@@ -626,7 +307,7 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     )
     
     # Add distance validation to master mask
-    master_mask = master_mask & (d_earth_pc > 0) & np.isfinite(d_earth_pc) & (d_earth_pc < 1e6)  # Max 1M pc
+    master_mask = master_mask & (d_earth_pc > 0) & np.isfinite(d_earth_pc) & (d_earth_pc < MAX_DISTANCE_PC)
     
     if not np.any(master_mask):
         return None
@@ -637,11 +318,12 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     ra_values = ra_values[master_mask]
     dec_values = dec_values[master_mask]
     mag_values = mag_values[master_mask]
+    bp_rp_values = bp_rp_values[master_mask]
     has_valid_parallax = valid_parallax_mask[master_mask]
     
-    # Identify extremely bright background objects (parallax 0, abs mag <= 8)
+    # Identify background objects: stars without valid parallax OR stars beyond distance threshold
     # These should be treated as fixed background points (same position regardless of target)
-    background_mask = ~has_valid_parallax
+    background_mask = ~has_valid_parallax | (d_earth_pc >= BACKGROUND_DISTANCE_THRESHOLD_PC)
     bright_background_mask = np.zeros(len(background_mask), dtype=bool)
     if np.any(background_mask):
         # Calculate absolute magnitude assuming the background distance
@@ -674,22 +356,26 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     stars_cart = stars_earth_icrs.cartesian.xyz.value.T  # Shape: (N, 3) - positions from Earth
     target_cart = target_3d.cartesian.xyz.value  # Shape: (3,) - target position from Earth
     
-    # Use unified get_relative_coords function to calculate vectors from target
-    vectors_from_target, d_new_pc, _ = get_relative_coords(target_cart, stars_cart)
-    
+    # Calculate vectors from target to each star (in ICRS cartesian coordinates)
     # For bright background objects, use their Earth-centric direction directly
     # (they appear at the same projected position regardless of target star)
+    vectors_from_target = stars_cart - target_cart  # Shape: (N, 3) - NumPy broadcasts (3,) to (N, 3)
     if np.any(bright_background_mask):
         # Replace with Earth-centric unit vectors for bright background objects
         # These appear at the same position regardless of target star (fixed background)
         # The azimuth/elevation calculated from these will be Earth-centric
         vectors_from_target[bright_background_mask] = bright_bg_cart
+    
+    # Calculate distance from target star
+    # For bright background objects, distance is effectively infinite (use large value)
+    d_new_pc = np.linalg.norm(vectors_from_target, axis=1)  # Euclidean distance
+    if np.any(bright_background_mask):
         # Bright background objects are at effectively infinite distance
         d_new_pc[bright_background_mask] = ASSUMED_BACKGROUND_DISTANCE_PC
     
     # Build second master mask for target distance validation
     # (we need to do calculations first, then filter)
-    master_mask_2 = (d_new_pc > 0) & np.isfinite(d_new_pc) & (d_new_pc < 1e6)
+    master_mask_2 = (d_new_pc > 0) & np.isfinite(d_new_pc) & (d_new_pc < MAX_DISTANCE_PC)
     if not np.any(master_mask_2):
         return None
     
@@ -700,9 +386,12 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     ra_values = ra_values[master_mask_2]
     dec_values = dec_values[master_mask_2]
     mag_values = mag_values[master_mask_2]
+    bp_rp_values = bp_rp_values[master_mask_2]
     d_earth_pc = d_earth_pc[master_mask_2]
     has_valid_parallax = has_valid_parallax[master_mask_2]
     bright_background_mask = bright_background_mask[master_mask_2]
+    # Keep background_mask in sync with other arrays to avoid index mismatches
+    background_mask = background_mask[master_mask_2]
     
     # Calculate angular coordinates directly from cartesian vectors
     # Use z-component to determine hemisphere: positive z = north, negative z = south
@@ -744,11 +433,12 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     # This applies the distance modulus relative to the new observer position
     m_new = M_intrinsic + 5 * np.log10(d_new_pc) - 5
     
-    # Special case: bright background objects are treated as fixed background
+    # Special case: ALL background objects (not just bright ones) are treated as fixed background
     # They appear at the same position regardless of target, so use Earth's apparent magnitude
-    bright_bg_idx = np.where(bright_background_mask)[0]
-    if len(bright_bg_idx) > 0:
-        m_new[bright_bg_idx] = mag_values[bright_bg_idx]
+    # This prevents background stars from being incorrectly dimmed by distance calculations
+    background_idx = np.where(background_mask)[0]
+    if len(background_idx) > 0:
+        m_new[background_idx] = mag_values[background_idx]
     
     # Build final master mask: combine coordinate validation, magnitude filter, and final validation
     # Verify we got valid coordinates
@@ -761,7 +451,7 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     if dump_positions:
         final_mask = np.isfinite(m_new) & valid_coord_check
     else:
-        final_mask = (m_new < 6.5) & np.isfinite(m_new) & valid_coord_check
+        final_mask = (m_new < VISIBLE_MAG_LIMIT) & np.isfinite(m_new) & valid_coord_check
     
     if not np.any(final_mask):
         return None
@@ -775,6 +465,7 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     elevation_rad_final = elevation_rad[final_mask]
     z_final = z[final_mask]  # unit z-component for hemisphere determination
     m_plot = m_new[final_mask]
+    bp_rp_final = bp_rp_values[final_mask]
     source_ids_final = source_ids[final_mask]
     
     # Final validation: ensure all extracted values are finite (combine into single check)
@@ -795,195 +486,21 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
         'azimuth_rad': azimuth_rad_final[valid_final],
         'elevation_rad': elevation_rad_final[valid_final],
         'z': z_final[valid_final],  # unit z: positive = north, negative = south
-        'm_new': m_plot[valid_final]
+        'm_new': m_plot[valid_final],
+        'bp_rp': bp_rp_final[valid_final]
     }
 
 def get_bright_galaxies():
-    """Return data for the four brightest distant background galaxies visible to naked eye.
-    
-    Returns list of dicts with: name, ra_deg, dec_deg, major_axis_deg, minor_axis_deg, 
-    position_angle_deg, apparent_mag, distance_pc
-    Galaxies are too distant for parallax, so we use distance estimates.
-    """
-    return [
-        {
-            'name': 'LMC',
-            'ra_deg': 80.8938,  # Large Magellanic Cloud
-            'dec_deg': -69.7561,
-            'major_axis_deg': 10.75,  # Angular size
-            'minor_axis_deg': 9.33,
-            'position_angle_deg': 0,  # Approximate
-            'apparent_mag': 0.9,
-            'distance_pc': 50000.0  # ~163 kly
-        },
-        {
-            'name': 'SMC',
-            'ra_deg': 13.1867,  # Small Magellanic Cloud
-            'dec_deg': -72.8286,
-            'major_axis_deg': 5.20,
-            'minor_axis_deg': 3.25,
-            'position_angle_deg': 45,  # Approximate
-            'apparent_mag': 2.7,
-            'distance_pc': 60000.0  # ~196 kly
-        },
-        {
-            'name': 'Andromeda',
-            'ra_deg': 10.6847,  # M31
-            'dec_deg': 41.2687,
-            'major_axis_deg': 3.167,  # ~190 arcmin
-            'minor_axis_deg': 1.0,     # ~60 arcmin
-            'position_angle_deg': 35,  # Approximate
-            'apparent_mag': 3.4,
-            'distance_pc': 2540000.0  # ~2.54 Mly
-        },
-        {
-            'name': 'Triangulum',
-            'ra_deg': 23.4621,  # M33
-            'dec_deg': 30.6602,
-            'major_axis_deg': 1.0,     # ~60 arcmin
-            'minor_axis_deg': 0.7,     # ~40 arcmin
-            'position_angle_deg': 23,  # Approximate
-            'apparent_mag': 5.7,
-            'distance_pc': 3000000.0  # ~3.0 Mly
-        }
-    ]
+    """Return static bright galaxy data from shared star_data module."""
+    return _stardata_get_bright_galaxies()
 
 def get_bright_stars():
-    """Return data for ~100 brightest and most well-known stars.
-    
-    Returns list of dicts with: name, ra_deg, dec_deg, apparent_mag, parallax_mas
-    Parallax values in milliarcseconds (mas). If None or 0, object is too distant for parallax measurement.
-    """
-    return [
-        # Top 20 brightest stars
-        # Parallax values from Hipparcos/Gaia (mas). Distance (pc) = 1000 / parallax_mas
-        {'name': 'Sirius', 'ra_deg': 101.2872, 'dec_deg': -16.7161, 'apparent_mag': -1.46, 'parallax_mas': 379.21},  # 2.64 pc
-        {'name': 'Canopus', 'ra_deg': 95.9880, 'dec_deg': -52.6957, 'apparent_mag': -0.74, 'parallax_mas': 10.43},  # 95.9 pc
-        {'name': 'Rigil Kentaurus', 'ra_deg': 219.9009, 'dec_deg': -60.8356, 'apparent_mag': -0.27, 'parallax_mas': 754.81},  # 1.32 pc (Alpha Centauri)
-        {'name': 'Arcturus', 'ra_deg': 213.9153, 'dec_deg': 19.1824, 'apparent_mag': -0.05, 'parallax_mas': 88.83},  # 11.26 pc
-        {'name': 'Vega', 'ra_deg': 279.2347, 'dec_deg': 38.7837, 'apparent_mag': 0.03, 'parallax_mas': 130.23},  # 7.68 pc
-        {'name': 'Capella', 'ra_deg': 79.1723, 'dec_deg': 45.9980, 'apparent_mag': 0.08, 'parallax_mas': 77.29},  # 12.94 pc
-        {'name': 'Rigel', 'ra_deg': 78.6345, 'dec_deg': -8.2016, 'apparent_mag': 0.13, 'parallax_mas': 3.78},  # 264.6 pc
-        {'name': 'Procyon', 'ra_deg': 114.8255, 'dec_deg': 5.2249, 'apparent_mag': 0.34, 'parallax_mas': 286.05},  # 3.50 pc
-        {'name': 'Betelgeuse', 'ra_deg': 88.7929, 'dec_deg': 7.4071, 'apparent_mag': 0.42, 'parallax_mas': 4.51},  # 221.7 pc
-        {'name': 'Achernar', 'ra_deg': 24.4285, 'dec_deg': -57.2368, 'apparent_mag': 0.46, 'parallax_mas': 23.39},  # 42.75 pc
-        {'name': 'Hadar', 'ra_deg': 210.9559, 'dec_deg': -60.3730, 'apparent_mag': 0.61, 'parallax_mas': 8.32},  # 120.2 pc
-        {'name': 'Altair', 'ra_deg': 297.6958, 'dec_deg': 8.8683, 'apparent_mag': 0.76, 'parallax_mas': 194.44},  # 5.14 pc
-        {'name': 'Acrux', 'ra_deg': 186.6496, 'dec_deg': -63.0991, 'apparent_mag': 0.77, 'parallax_mas': 10.13},  # 98.7 pc
-        {'name': 'Aldebaran', 'ra_deg': 68.9802, 'dec_deg': 16.5093, 'apparent_mag': 0.85, 'parallax_mas': 48.94},  # 20.43 pc
-        {'name': 'Antares', 'ra_deg': 247.3519, 'dec_deg': -26.4320, 'apparent_mag': 0.96, 'parallax_mas': 5.89},  # 169.8 pc
-        {'name': 'Spica', 'ra_deg': 201.2983, 'dec_deg': -11.1613, 'apparent_mag': 0.98, 'parallax_mas': 12.44},  # 80.39 pc
-        {'name': 'Pollux', 'ra_deg': 116.3289, 'dec_deg': 28.0262, 'apparent_mag': 1.14, 'parallax_mas': 96.54},  # 10.36 pc
-        {'name': 'Fomalhaut', 'ra_deg': 344.4127, 'dec_deg': -29.6222, 'apparent_mag': 1.16, 'parallax_mas': 130.08},  # 7.69 pc
-        {'name': 'Deneb', 'ra_deg': 310.3579, 'dec_deg': 45.2803, 'apparent_mag': 1.25, 'parallax_mas': 2.31},  # 433.0 pc
-        {'name': 'Mimosa', 'ra_deg': 191.9303, 'dec_deg': -59.6888, 'apparent_mag': 1.25, 'parallax_mas': 12.59},  # 79.4 pc
-        # Additional well-known stars
-        {'name': 'Polaris', 'ra_deg': 37.9546, 'dec_deg': 89.2641, 'apparent_mag': 1.98, 'parallax_mas': 7.54},  # 132.6 pc
-        {'name': 'Regulus', 'ra_deg': 152.0929, 'dec_deg': 11.9672, 'apparent_mag': 1.35, 'parallax_mas': 42.09},  # 23.76 pc
-        {'name': 'Castor', 'ra_deg': 113.6494, 'dec_deg': 31.8883, 'apparent_mag': 1.58, 'parallax_mas': 66.50},  # 15.04 pc
-        {'name': 'Bellatrix', 'ra_deg': 81.2828, 'dec_deg': 6.3497, 'apparent_mag': 1.64, 'parallax_mas': 13.42},  # 74.5 pc
-        {'name': 'Elnath', 'ra_deg': 81.5728, 'dec_deg': 28.6075, 'apparent_mag': 1.65, 'parallax_mas': 23.84},  # 41.95 pc
-        {'name': 'Miaplacidus', 'ra_deg': 138.2999, 'dec_deg': -69.7172, 'apparent_mag': 1.67, 'parallax_mas': 20.71},  # 48.3 pc
-        {'name': 'Alnilam', 'ra_deg': 84.0534, 'dec_deg': -1.2019, 'apparent_mag': 1.69, 'parallax_mas': 1.65},  # 606 pc
-        {'name': 'Alnitak', 'ra_deg': 85.1897, 'dec_deg': -1.9426, 'apparent_mag': 1.74, 'parallax_mas': 4.43},  # 225.7 pc
-        {'name': 'Mirfak', 'ra_deg': 51.0807, 'dec_deg': 49.8612, 'apparent_mag': 1.79, 'parallax_mas': 6.44},  # 155.3 pc
-        {'name': 'Dubhe', 'ra_deg': 165.9320, 'dec_deg': 61.7510, 'apparent_mag': 1.79, 'parallax_mas': 26.54},  # 37.68 pc
-        {'name': 'Wezen', 'ra_deg': 107.0979, 'dec_deg': -26.3932, 'apparent_mag': 1.83, 'parallax_mas': 2.43},  # 411.5 pc
-        {'name': 'Alkaid', 'ra_deg': 206.8852, 'dec_deg': 49.3133, 'apparent_mag': 1.86, 'parallax_mas': 31.88},  # 31.37 pc
-        {'name': 'Sargas', 'ra_deg': 255.9867, 'dec_deg': -42.9978, 'apparent_mag': 1.87, 'parallax_mas': 5.89},  # 169.8 pc
-        {'name': 'Avior', 'ra_deg': 125.6285, 'dec_deg': -59.5095, 'apparent_mag': 1.86, 'parallax_mas': 7.51},  # 133.2 pc
-        {'name': 'Menkalinan', 'ra_deg': 89.8822, 'dec_deg': 44.9474, 'apparent_mag': 1.90, 'parallax_mas': 40.16},  # 24.90 pc
-        {'name': 'Atria', 'ra_deg': 252.1662, 'dec_deg': -69.0277, 'apparent_mag': 1.91, 'parallax_mas': 8.33},  # 120.0 pc
-        {'name': 'Alhena', 'ra_deg': 99.4279, 'dec_deg': 16.5403, 'apparent_mag': 1.93, 'parallax_mas': 30.49},  # 32.80 pc
-        {'name': 'Peacock', 'ra_deg': 306.4119, 'dec_deg': -56.7351, 'apparent_mag': 1.94, 'parallax_mas': 7.56},  # 132.3 pc
-        {'name': 'Alsephina', 'ra_deg': 140.5284, 'dec_deg': -54.7088, 'apparent_mag': 1.96, 'parallax_mas': 8.46},  # 118.2 pc
-        {'name': 'Mirzam', 'ra_deg': 95.6749, 'dec_deg': -17.9559, 'apparent_mag': 1.98, 'parallax_mas': 3.29},  # 304.0 pc
-        {'name': 'Alphard', 'ra_deg': 141.8968, 'dec_deg': -8.6586, 'apparent_mag': 1.99, 'parallax_mas': 41.35},  # 24.18 pc
-        {'name': 'Algieba', 'ra_deg': 154.9926, 'dec_deg': 19.8415, 'apparent_mag': 2.01, 'parallax_mas': 25.96},  # 38.52 pc
-        {'name': 'Diphda', 'ra_deg': 10.8974, 'dec_deg': -17.9866, 'apparent_mag': 2.04, 'parallax_mas': 33.62},  # 29.74 pc
-        {'name': 'Mizar', 'ra_deg': 200.9814, 'dec_deg': 54.9254, 'apparent_mag': 2.04, 'parallax_mas': 41.73},  # 23.96 pc
-        {'name': 'Nunki', 'ra_deg': 283.8164, 'dec_deg': -26.2961, 'apparent_mag': 2.05, 'parallax_mas': 13.87},  # 72.1 pc
-        {'name': 'Kaus Australis', 'ra_deg': 276.0430, 'dec_deg': -34.3846, 'apparent_mag': 1.79, 'parallax_mas': 8.34},  # 119.9 pc
-        {'name': 'Sadr', 'ra_deg': 305.5571, 'dec_deg': 40.2567, 'apparent_mag': 2.23, 'parallax_mas': 1.78},  # 561.8 pc
-        {'name': 'Eltanin', 'ra_deg': 262.6082, 'dec_deg': 51.4889, 'apparent_mag': 2.24, 'parallax_mas': 21.09},  # 47.4 pc
-        {'name': 'Kaus Media', 'ra_deg': 274.4067, 'dec_deg': -29.8281, 'apparent_mag': 2.70, 'parallax_mas': 8.59},  # 116.4 pc
-        {'name': 'Alpheratz', 'ra_deg': 2.0969, 'dec_deg': 29.0904, 'apparent_mag': 2.07, 'parallax_mas': 33.62},  # 29.74 pc
-        {'name': 'Mirach', 'ra_deg': 17.4330, 'dec_deg': 35.6206, 'apparent_mag': 2.07, 'parallax_mas': 16.52},  # 60.5 pc
-        {'name': 'Rasalgethi', 'ra_deg': 258.6619, 'dec_deg': 14.3903, 'apparent_mag': 2.78, 'parallax_mas': 8.64},  # 115.7 pc
-        {'name': 'Kochab', 'ra_deg': 222.6764, 'dec_deg': 74.1555, 'apparent_mag': 2.08, 'parallax_mas': 17.49},  # 57.2 pc
-        {'name': 'Saiph', 'ra_deg': 86.9391, 'dec_deg': -9.6696, 'apparent_mag': 2.07, 'parallax_mas': 5.04},  # 198.4 pc
-        {'name': 'Hamal', 'ra_deg': 31.7934, 'dec_deg': 23.4624, 'apparent_mag': 2.01, 'parallax_mas': 49.56},  # 20.18 pc
-        {'name': 'Algol', 'ra_deg': 47.0422, 'dec_deg': 40.9556, 'apparent_mag': 2.09, 'parallax_mas': 35.14},  # 28.46 pc
-        {'name': 'Dschubba', 'ra_deg': 240.0833, 'dec_deg': -22.6217, 'apparent_mag': 2.29, 'parallax_mas': 5.48},  # 182.5 pc
-        {'name': 'Zubeneschamali', 'ra_deg': 229.2517, 'dec_deg': -9.3829, 'apparent_mag': 2.61, 'parallax_mas': 18.77},  # 53.3 pc
-        {'name': 'Graffias', 'ra_deg': 244.5804, 'dec_deg': -26.4321, 'apparent_mag': 2.62, 'parallax_mas': 5.89},  # 169.8 pc
-        {'name': 'Iota Carinae', 'ra_deg': 139.2725, 'dec_deg': -59.2752, 'apparent_mag': 2.21, 'parallax_mas': 4.20},  # 238.1 pc
-        {'name': 'Theta Carinae', 'ra_deg': 160.7392, 'dec_deg': -64.3944, 'apparent_mag': 2.74, 'parallax_mas': 5.55},  # 180.2 pc
-        {'name': 'Aspidiske', 'ra_deg': 141.5269, 'dec_deg': -64.3944, 'apparent_mag': 2.21, 'parallax_mas': 5.40},  # 185.2 pc
-        # Additional bright stars to reach ~100
-        {'name': 'Schedar', 'ra_deg': 10.1268, 'dec_deg': 56.5373, 'apparent_mag': 2.24, 'parallax_mas': 14.29},  # 70.0 pc
-        {'name': 'Caph', 'ra_deg': 2.2945, 'dec_deg': 59.1498, 'apparent_mag': 2.28, 'parallax_mas': 60.42},  # 16.55 pc
-        {'name': 'Achird', 'ra_deg': 9.8322, 'dec_deg': 54.2844, 'apparent_mag': 3.46, 'parallax_mas': 168.45},  # 5.94 pc
-        {'name': 'Almach', 'ra_deg': 30.9748, 'dec_deg': 42.3297, 'apparent_mag': 2.10, 'parallax_mas': 16.64},  # 60.1 pc
-        {'name': 'Mira', 'ra_deg': 34.8367, 'dec_deg': -2.9774, 'apparent_mag': 2.0, 'parallax_mas': 10.91},  # 91.7 pc
-        {'name': 'Menkar', 'ra_deg': 45.5699, 'dec_deg': 4.0897, 'apparent_mag': 2.54, 'parallax_mas': 15.79},  # 63.3 pc
-        {'name': 'Baten Kaitos', 'ra_deg': 13.6605, 'dec_deg': -10.3350, 'apparent_mag': 3.74, 'parallax_mas': 16.23},  # 61.6 pc
-        {'name': 'Ankaa', 'ra_deg': 6.5708, 'dec_deg': -42.3058, 'apparent_mag': 2.40, 'parallax_mas': 40.90},  # 24.45 pc
-        {'name': 'Markab', 'ra_deg': 346.1902, 'dec_deg': 15.2053, 'apparent_mag': 2.49, 'parallax_mas': 15.07},  # 66.4 pc
-        {'name': 'Scheat', 'ra_deg': 345.9436, 'dec_deg': 28.0828, 'apparent_mag': 2.44, 'parallax_mas': 16.64},  # 60.1 pc
-        {'name': 'Algenib', 'ra_deg': 3.3089, 'dec_deg': 15.1836, 'apparent_mag': 2.83, 'parallax_mas': 12.10},  # 82.6 pc
-        {'name': 'Enif', 'ra_deg': 326.0465, 'dec_deg': 9.8750, 'apparent_mag': 2.38, 'parallax_mas': 4.97},  # 201.2 pc
-        {'name': 'Homam', 'ra_deg': 340.7508, 'dec_deg': 10.8314, 'apparent_mag': 3.40, 'parallax_mas': 20.23},  # 49.4 pc
-        {'name': 'Matar', 'ra_deg': 330.6800, 'dec_deg': 30.2211, 'apparent_mag': 2.99, 'parallax_mas': 13.33},  # 75.0 pc
-        {'name': 'Biham', 'ra_deg': 340.3652, 'dec_deg': 6.1978, 'apparent_mag': 3.51, 'parallax_mas': 20.23},  # 49.4 pc
-        {'name': 'Sadalbari', 'ra_deg': 344.4127, 'dec_deg': -29.6222, 'apparent_mag': 3.51, 'parallax_mas': 22.46},  # 44.5 pc
-    ]
+    """Return bright star data from shared star_data module."""
+    return _stardata_get_bright_stars()
 
 def get_bright_deep_sky_objects():
-    """Return data for magnitude 7 or brighter nebulas, globular clusters, and other non-star objects.
-    
-    Returns list of dicts with: name, ra_deg, dec_deg, major_axis_deg, minor_axis_deg, 
-    position_angle_deg, apparent_mag, object_type, distance_pc
-    Distance values in parsecs. Where parallax measurements are available, distances are based on those.
-    """
-    return [
-        # Bright Nebulas
-        {'name': 'Orion Nebula', 'ra_deg': 83.8221, 'dec_deg': -5.3911, 'major_axis_deg': 1.5, 'minor_axis_deg': 1.0, 'position_angle_deg': 0, 'apparent_mag': 4.0, 'object_type': 'nebula', 'distance_pc': 414.0},  # VLBA parallax
-        {'name': 'Carina Nebula', 'ra_deg': 160.8950, 'dec_deg': -59.6856, 'major_axis_deg': 2.0, 'minor_axis_deg': 2.0, 'position_angle_deg': 0, 'apparent_mag': 1.0, 'object_type': 'nebula', 'distance_pc': 2350.0},  # Gaia EDR3
-        {'name': 'Eagle Nebula', 'ra_deg': 274.7000, 'dec_deg': -13.8067, 'major_axis_deg': 0.5, 'minor_axis_deg': 0.5, 'position_angle_deg': 0, 'apparent_mag': 6.0, 'object_type': 'nebula', 'distance_pc': 2000.0},  # ~2 kpc
-        {'name': 'Lagoon Nebula', 'ra_deg': 271.0000, 'dec_deg': -24.3833, 'major_axis_deg': 1.33, 'minor_axis_deg': 1.0, 'position_angle_deg': 0, 'apparent_mag': 6.0, 'object_type': 'nebula', 'distance_pc': 4100.0},  # ~4.1 kpc
-        {'name': 'Trifid Nebula', 'ra_deg': 270.6700, 'dec_deg': -23.0167, 'major_axis_deg': 0.5, 'minor_axis_deg': 0.5, 'position_angle_deg': 0, 'apparent_mag': 6.3, 'object_type': 'nebula', 'distance_pc': 4100.0},  # ~4.1 kpc (near Lagoon)
-        {'name': 'Omega Nebula', 'ra_deg': 275.2000, 'dec_deg': -16.1500, 'major_axis_deg': 0.67, 'minor_axis_deg': 0.5, 'position_angle_deg': 0, 'apparent_mag': 6.0, 'object_type': 'nebula', 'distance_pc': 2000.0},  # ~2 kpc
-        {'name': 'Rosette Nebula', 'ra_deg': 97.9500, 'dec_deg': 4.9500, 'major_axis_deg': 1.33, 'minor_axis_deg': 1.0, 'position_angle_deg': 0, 'apparent_mag': 4.8, 'object_type': 'nebula', 'distance_pc': 1600.0},  # ~1.6 kpc
-        {'name': 'Horsehead Nebula', 'ra_deg': 85.2500, 'dec_deg': -2.4500, 'major_axis_deg': 0.17, 'minor_axis_deg': 0.17, 'position_angle_deg': 0, 'apparent_mag': 6.8, 'object_type': 'nebula', 'distance_pc': 414.0},  # Same region as Orion
-        {'name': 'North America Nebula', 'ra_deg': 314.7000, 'dec_deg': 44.0167, 'major_axis_deg': 2.0, 'minor_axis_deg': 1.5, 'position_angle_deg': 0, 'apparent_mag': 4.0, 'object_type': 'nebula', 'distance_pc': 1800.0},  # ~1.8 kpc
-        {'name': 'Veil Nebula', 'ra_deg': 312.7500, 'dec_deg': 30.7833, 'major_axis_deg': 3.0, 'minor_axis_deg': 2.5, 'position_angle_deg': 0, 'apparent_mag': 7.0, 'object_type': 'nebula', 'distance_pc': 1470.0},  # ~1.47 kpc (supernova remnant)
-        {'name': 'Dumbbell Nebula', 'ra_deg': 299.9017, 'dec_deg': 22.7211, 'major_axis_deg': 0.25, 'minor_axis_deg': 0.17, 'position_angle_deg': 0, 'apparent_mag': 7.4, 'object_type': 'nebula', 'distance_pc': 1360.0},  # Planetary nebula
-        {'name': 'Ring Nebula', 'ra_deg': 283.3961, 'dec_deg': 33.0292, 'major_axis_deg': 0.08, 'minor_axis_deg': 0.08, 'position_angle_deg': 0, 'apparent_mag': 8.8, 'object_type': 'nebula', 'distance_pc': 2300.0},  # Planetary nebula
-        {'name': 'Helix Nebula', 'ra_deg': 337.4100, 'dec_deg': -20.8333, 'major_axis_deg': 0.5, 'minor_axis_deg': 0.5, 'position_angle_deg': 0, 'apparent_mag': 7.3, 'object_type': 'nebula', 'distance_pc': 695.0},  # ~695 pc (planetary nebula)
-        {'name': 'Crab Nebula', 'ra_deg': 83.6331, 'dec_deg': 22.0144, 'major_axis_deg': 0.17, 'minor_axis_deg': 0.17, 'position_angle_deg': 0, 'apparent_mag': 8.4, 'object_type': 'nebula', 'distance_pc': 2000.0},  # ~2 kpc (supernova remnant)
-        # Globular Clusters
-        {'name': 'Omega Centauri', 'ra_deg': 201.6967, 'dec_deg': -47.4794, 'major_axis_deg': 0.55, 'minor_axis_deg': 0.55, 'position_angle_deg': 0, 'apparent_mag': 3.7, 'object_type': 'globular', 'distance_pc': 5200.0},  # ~5.2 kpc
-        {'name': '47 Tucanae', 'ra_deg': 6.0229, 'dec_deg': -72.0814, 'major_axis_deg': 0.5, 'minor_axis_deg': 0.5, 'position_angle_deg': 0, 'apparent_mag': 4.0, 'object_type': 'globular', 'distance_pc': 4500.0},  # ~4.5 kpc
-        {'name': 'M13', 'ra_deg': 250.4233, 'dec_deg': 36.4614, 'major_axis_deg': 0.33, 'minor_axis_deg': 0.33, 'position_angle_deg': 0, 'apparent_mag': 5.8, 'object_type': 'globular', 'distance_pc': 7100.0},  # ~7.1 kpc
-        {'name': 'M3', 'ra_deg': 205.5483, 'dec_deg': 28.3772, 'major_axis_deg': 0.25, 'minor_axis_deg': 0.25, 'position_angle_deg': 0, 'apparent_mag': 6.2, 'object_type': 'globular', 'distance_pc': 10200.0},  # ~10.2 kpc
-        {'name': 'M5', 'ra_deg': 229.6383, 'dec_deg': 2.0811, 'major_axis_deg': 0.25, 'minor_axis_deg': 0.25, 'position_angle_deg': 0, 'apparent_mag': 5.6, 'object_type': 'globular', 'distance_pc': 7500.0},  # ~7.5 kpc
-        {'name': 'M4', 'ra_deg': 245.8967, 'dec_deg': -26.5256, 'major_axis_deg': 0.33, 'minor_axis_deg': 0.33, 'position_angle_deg': 0, 'apparent_mag': 5.6, 'object_type': 'globular', 'distance_pc': 2200.0},  # ~2.2 kpc (closest globular)
-        {'name': 'M22', 'ra_deg': 279.1000, 'dec_deg': -23.9047, 'major_axis_deg': 0.33, 'minor_axis_deg': 0.33, 'position_angle_deg': 0, 'apparent_mag': 5.1, 'object_type': 'globular', 'distance_pc': 3200.0},  # ~3.2 kpc
-        {'name': 'M15', 'ra_deg': 322.4933, 'dec_deg': 12.1672, 'major_axis_deg': 0.25, 'minor_axis_deg': 0.25, 'position_angle_deg': 0, 'apparent_mag': 6.2, 'object_type': 'globular', 'distance_pc': 10400.0},  # ~10.4 kpc
-        {'name': 'M2', 'ra_deg': 323.3625, 'dec_deg': -0.8233, 'major_axis_deg': 0.17, 'minor_axis_deg': 0.17, 'position_angle_deg': 0, 'apparent_mag': 6.5, 'object_type': 'globular', 'distance_pc': 11500.0},  # ~11.5 kpc
-        {'name': 'M92', 'ra_deg': 259.2817, 'dec_deg': 43.1358, 'major_axis_deg': 0.17, 'minor_axis_deg': 0.17, 'position_angle_deg': 0, 'apparent_mag': 6.4, 'object_type': 'globular', 'distance_pc': 8300.0},  # ~8.3 kpc
-        # Open Clusters
-        {'name': 'Pleiades', 'ra_deg': 56.8711, 'dec_deg': 24.1053, 'major_axis_deg': 2.0, 'minor_axis_deg': 2.0, 'position_angle_deg': 0, 'apparent_mag': 1.6, 'object_type': 'cluster', 'distance_pc': 135.0},  # Hipparcos/Gaia parallax
-        {'name': 'Hyades', 'ra_deg': 66.7325, 'dec_deg': 15.8700, 'major_axis_deg': 5.5, 'minor_axis_deg': 4.0, 'position_angle_deg': 0, 'apparent_mag': 0.5, 'object_type': 'cluster', 'distance_pc': 46.35},  # Hipparcos parallax
-        {'name': 'Beehive Cluster', 'ra_deg': 130.1000, 'dec_deg': 19.6667, 'major_axis_deg': 1.5, 'minor_axis_deg': 1.5, 'position_angle_deg': 0, 'apparent_mag': 3.7, 'object_type': 'cluster', 'distance_pc': 187.0},  # M44, ~187 pc
-        {'name': 'Double Cluster', 'ra_deg': 34.7500, 'dec_deg': 57.1500, 'major_axis_deg': 1.0, 'minor_axis_deg': 1.0, 'position_angle_deg': 0, 'apparent_mag': 4.3, 'object_type': 'cluster', 'distance_pc': 2300.0},  # h+Chi Persei, ~2.3 kpc
-        {'name': 'M6', 'ra_deg': 265.0833, 'dec_deg': -32.2167, 'major_axis_deg': 1.0, 'minor_axis_deg': 1.0, 'position_angle_deg': 0, 'apparent_mag': 4.2, 'object_type': 'cluster', 'distance_pc': 1600.0},  # ~1.6 kpc
-        {'name': 'M7', 'ra_deg': 268.4708, 'dec_deg': -34.7917, 'major_axis_deg': 1.33, 'minor_axis_deg': 1.33, 'position_angle_deg': 0, 'apparent_mag': 3.3, 'object_type': 'cluster', 'distance_pc': 980.0},  # ~980 pc
-        {'name': 'M11', 'ra_deg': 282.7750, 'dec_deg': -6.2667, 'major_axis_deg': 0.67, 'minor_axis_deg': 0.67, 'position_angle_deg': 0, 'apparent_mag': 5.8, 'object_type': 'cluster', 'distance_pc': 6100.0},  # ~6.1 kpc
-        {'name': 'M44', 'ra_deg': 130.1000, 'dec_deg': 19.6667, 'major_axis_deg': 1.5, 'minor_axis_deg': 1.5, 'position_angle_deg': 0, 'apparent_mag': 3.7, 'object_type': 'cluster', 'distance_pc': 187.0},  # Beehive Cluster, same as above
-        {'name': 'M45', 'ra_deg': 56.8711, 'dec_deg': 24.1053, 'major_axis_deg': 2.0, 'minor_axis_deg': 2.0, 'position_angle_deg': 0, 'apparent_mag': 1.6, 'object_type': 'cluster', 'distance_pc': 135.0},  # Pleiades, same as above
-    ]
+    """Return DSO data from shared star_data module."""
+    return _stardata_get_bright_deep_sky_objects()
 
 def plot_galaxy_on_hemisphere(ax, galaxy, azimuth_rad, elevation_rad, is_north_hemisphere, clip_to_equator=False):
     """Plot a galaxy as an ellipse on a polar plot hemisphere.
@@ -1158,92 +675,19 @@ def plot_galaxy_on_hemisphere(ax, galaxy, azimuth_rad, elevation_rad, is_north_h
                        transform=ax.transData)
 
 def get_relative_coords(target_xyz, object_xyz):
-    """Calculate relative coordinates from target to object.
-    
-    This is a unified utility function that calculates the relative vector,
-    distance, and unit direction vector from target to object.
-    
-    Args:
-        target_xyz: Target position as 3D cartesian coordinates (shape: (3,) or (N, 3))
-        object_xyz: Object position as 3D cartesian coordinates (shape: (3,) or (N, 3))
-    
-    Returns:
-        tuple: (vector_from_target, distance_pc, unit_vector)
-            - vector_from_target: Vector from target to object (same shape as inputs)
-            - distance_pc: Distance in parsecs (scalar or array)
-            - unit_vector: Normalized direction vector (same shape as inputs)
-    """
-    # Handle both single vectors and arrays
-    target_xyz = np.asarray(target_xyz)
-    object_xyz = np.asarray(object_xyz)
-    
-    # Vector from target to object
-    vector_from_target = object_xyz - target_xyz
-    
-    # Calculate distance
-    if vector_from_target.ndim == 1:
-        distance_pc = np.linalg.norm(vector_from_target)
-        # Normalize to get unit direction vector (single vector case)
-        if distance_pc > 1e-10:
-            unit_vector = vector_from_target / distance_pc
-        else:
-            unit_vector = vector_from_target
-    else:
-        distance_pc = np.linalg.norm(vector_from_target, axis=-1)
-        # Normalize to get unit direction vector (array case)
-        vector_norm = distance_pc[..., np.newaxis]
-        # Avoid division by zero
-        vector_norm = np.where(vector_norm > 1e-10, vector_norm, 1.0)
-        unit_vector = vector_from_target / vector_norm
-    
-    return vector_from_target, distance_pc, unit_vector
+    """Delegate to shared math helper."""
+    return _math_get_relative_coords(target_xyz, object_xyz)
+
 
 def transform_to_target_frame(target_coord, object_ra_deg, object_dec_deg, object_distance_pc, use_earth_centric_approx=False):
-    """Transform object coordinates to azimuth/elevation from target's perspective.
-    
-    This is a unified utility function that handles the common coordinate transformation
-    logic used by galaxies, stars, and DSOs.
-    
-    Args:
-        target_coord: SkyCoord object representing the target's 3D position
-        object_ra_deg: Right ascension of the object in degrees
-        object_dec_deg: Declination of the object in degrees
-        object_distance_pc: Distance to the object in parsecs
-        use_earth_centric_approx: If True, use Earth-centric direction for very distant objects
-                                 (avoids numerical precision issues when object >> target distance)
-    
-    Returns:
-        (azimuth_rad, elevation_rad, z): Azimuth and elevation in radians, plus z component
-    """
-    target_cart = target_coord.cartesian.xyz.value  # Shape: (3,)
-    target_distance_pc = np.linalg.norm(target_cart)
-    
-    # For very distant objects, use Earth-centric direction to avoid numerical precision issues
-    if use_earth_centric_approx and (object_distance_pc > 100 * target_distance_pc or target_distance_pc < 1e-6):
-        # Object is much farther than target (or target is at origin) - use Earth-centric direction
-        # This is mathematically correct: for D >> d, direction from target ≈ direction from Earth
-        object_icrs = SkyCoord(ra=object_ra_deg*u.deg, dec=object_dec_deg*u.deg, 
-                             distance=1.0*u.pc, frame='icrs')  # Unit distance for direction only
-        object_cart = object_icrs.cartesian.xyz.value  # Shape: (3,) - unit direction vector from Earth
-        unit_vector = object_cart  # Already normalized, direction from Earth = direction from target
-    else:
-        # Calculate proper 3D position with vector subtraction
-        object_icrs = SkyCoord(ra=object_ra_deg*u.deg, dec=object_dec_deg*u.deg, 
-                             distance=object_distance_pc*u.pc, frame='icrs')
-        
-        # Get cartesian coordinates from Earth
-        object_cart = object_icrs.cartesian.xyz.value  # Shape: (3,)
-        
-        # Use unified get_relative_coords function
-        _, _, unit_vector = get_relative_coords(target_cart, object_cart)
-    
-    # Convert to azimuth and elevation
-    x, y, z = unit_vector
-    azimuth_rad = np.arctan2(y, x)
-    azimuth_rad = np.mod(azimuth_rad, 2 * np.pi)  # Normalize to [0, 2π)
-    elevation_rad = np.arcsin(np.clip(z, -1.0, 1.0))
-    
-    return azimuth_rad, elevation_rad, z
+    """Delegate to shared math helper."""
+    return _math_transform_to_target_frame(
+        target_coord,
+        object_ra_deg,
+        object_dec_deg,
+        object_distance_pc,
+        use_earth_centric_approx=use_earth_centric_approx,
+    )
 
 def calculate_galaxy_coordinates(galaxy, target_3d):
     """Calculate azimuth and elevation of a galaxy from target star's perspective.
@@ -1623,51 +1067,13 @@ def plot_sol_reference(ax, azimuth_rad, elevation_rad, is_north_hemisphere):
                    transform=ax.transData, zorder=10)
 
 def calculate_point_size_by_magnitude(magnitude, min_size=1, max_size=10, magnitude_brightest=10):
-    """Calculate point size based on apparent magnitude using linear interpolation.
-    
-    Point sizes are inversely linearly interpolated between min_size and max_size
-    based on magnitude. Brighter stars (lower magnitude values) result in larger point sizes.
-    
-    Args:
-        magnitude: Apparent magnitude (scalar or array). Can be negative for very bright stars.
-        min_size: Minimum point size (default: 1)
-        max_size: Maximum point size (default: 10)
-        magnitude_brightest: Highest magnitude to consider. Magnitudes above this return 0 (default: 10)
-                          Magnitude 0 maps to max_size, magnitude_brightest maps to min_size.
-    
-    Returns:
-        Point size(s) as scalar or array:
-        - Magnitude < 0: max_size
-        - 0 <= magnitude <= magnitude_brightest: linear interpolation from (0, max_size) to (magnitude_brightest, min_size)
-        - Magnitude > magnitude_brightest: 0
-    """
-    magnitude = np.asarray(magnitude)
-    
-    # Initialize output array
-    point_sizes = np.zeros_like(magnitude, dtype=float)
-    
-    # Magnitudes above magnitude_brightest get 0 (should not be plotted)
-    above_brightest = magnitude > magnitude_brightest
-    point_sizes[above_brightest] = 0.0
-    
-    # Magnitudes below 0 get max_size (very bright stars)
-    below_zero = magnitude < 0
-    point_sizes[below_zero] = max_size
-    
-    # Magnitudes between 0 and magnitude_brightest: linear interpolation
-    # At magnitude 0: max_size
-    # At magnitude magnitude_brightest: min_size
-    in_range = (magnitude >= 0) & (magnitude <= magnitude_brightest)
-    if np.any(in_range):
-        mag_range = magnitude_brightest - 0.0
-        size_range = max_size - min_size
-        # Linear interpolation: point_size = max_size - (magnitude - 0) * size_range / mag_range
-        point_sizes[in_range] = max_size - magnitude[in_range] * size_range / mag_range
-    
-    # Return scalar if input was scalar
-    if np.isscalar(magnitude):
-        return float(1.5 ** point_sizes)
-    return point_sizes
+    """Delegate to shared point-size helper."""
+    return _plot_calculate_point_size_by_magnitude(
+        magnitude,
+        min_size=min_size,
+        max_size=max_size,
+        magnitude_brightest=magnitude_brightest,
+    )
 
 def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, apparent_mag_from_target):
     """Plot a bright star with label on a polar plot hemisphere.
@@ -1690,7 +1096,7 @@ def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, a
     if (is_north_hemisphere and elevation_rad > 0) or (not is_north_hemisphere and elevation_rad < 0):
         # Calculate point size based on apparent magnitude from target
         # Use magnitude_brightest=6.5 to match the magnitude filter (m_new < 6.5)
-        point_size = calculate_point_size_by_magnitude(apparent_mag_from_target, min_size=0, max_size=10, magnitude_brightest=6.5)
+        point_size = calculate_point_size_by_magnitude(apparent_mag_from_target, min_size=0, max_size=16, magnitude_brightest=10.5)
         
         # Only plot if point size is greater than 0
         if point_size > 0:
@@ -1922,6 +1328,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     all_elevation_rad = []
     all_z = []
     all_m_plot = []
+    all_bp_rp = []
     
     total_stars = num_stars
     
@@ -1948,6 +1355,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                 all_elevation_rad.append(result['elevation_rad'])
                 all_z.append(result['z'])
                 all_m_plot.append(result['m_new'])
+                all_bp_rp.append(result['bp_rp'])
                 total_valid = sum(len(x) for x in all_azimuth_rad)
                 
                 if dump_positions:
@@ -1996,6 +1404,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     elevation_rad = np.concatenate(all_elevation_rad)
     z = np.concatenate(all_z)
     m_plot = np.concatenate(all_m_plot)
+    bp_rp = np.concatenate(all_bp_rp)
     
     print(f"  Azimuth range: {np.degrees(np.min(azimuth_rad)):.1f}° to {np.degrees(np.max(azimuth_rad)):.1f}°")
     print(f"  Elevation range: {np.degrees(np.min(elevation_rad)):.1f}° to {np.degrees(np.max(elevation_rad)):.1f}°")
@@ -2004,7 +1413,10 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     print(f"  Stars with z < 0: {np.sum(z < 0):,}")
     print(f"  Stars with z = 0: {np.sum(z == 0):,}")
     
-    del all_azimuth_rad, all_elevation_rad, all_z, all_m_plot
+    # Convert BP-RP color index to RGB colors (faint, with 30% transparency)
+    star_colors = bp_rp_to_rgb(bp_rp, alpha=1.0)
+    
+    del all_azimuth_rad, all_elevation_rad, all_z, all_m_plot, all_bp_rp
     
     if dump_positions:
         print(f"\nDumped {total_valid:,} star positions to star_positions_3d for target '{target_star_name}'.")
@@ -2013,8 +1425,13 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     
     # 5. Plotting Northern and Southern Hemispheres based on z-component
     # Scaling for stars
-    # Use magnitude_brightest=6.5 to match the magnitude filter (m_new < 6.5)
-    point_sizes = calculate_point_size_by_magnitude(m_plot, min_size=0, max_size=10, magnitude_brightest=6.5)
+    # Use magnitude_brightest=VISIBLE_MAG_LIMIT to match the magnitude filter (m_new < VISIBLE_MAG_LIMIT)
+    point_sizes = calculate_point_size_by_magnitude(
+        m_plot,
+        min_size=STAR_POINT_MIN_SIZE,
+        max_size=STAR_POINT_MAX_SIZE,
+        magnitude_brightest=VISIBLE_MAG_LIMIT,
+    )
 
     # Get bright galaxies, stars, and deep sky objects
     galaxies = get_bright_galaxies()
@@ -2074,8 +1491,8 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
         else:
             apparent_mag_from_target = star['apparent_mag']
         
-        # Only include stars that are bright enough (magnitude <= 6.5, same as regular stars)
-        if apparent_mag_from_target <= 6.5:
+        # Only include stars that are bright enough (magnitude <= VISIBLE_MAG_LIMIT, same as regular stars)
+        if apparent_mag_from_target <= VISIBLE_MAG_LIMIT:
             star_data.append({
                 'star': star,
                 'azimuth_rad': az,
@@ -2106,7 +1523,12 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
         # Map elevation to radial distance (center is North Pole, edge is Equator)
         # For north: radial = 90° - elevation (pole at center, equator at edge)
         radial_north = 0.5 * np.pi - elevation_rad[north_mask]
-        ax1.scatter(azimuth_rad[north_mask], radial_north, s=point_sizes[north_mask], color='white', alpha=0.8)
+        # Use star colors (already includes alpha), but ensure we have the right shape
+        if star_colors.ndim == 2:
+            colors_north = star_colors[north_mask]
+        else:
+            colors_north = star_colors
+        ax1.scatter(azimuth_rad[north_mask], radial_north, s=point_sizes[north_mask], c=colors_north, edgecolors='none')
         
         # Plot galaxies that are in or cross the northern hemisphere
         for gd in galaxy_data:
@@ -2185,7 +1607,12 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
         # For south: radial = 90° + elevation (pole at center, equator at edge)
         # Note: elevation is negative for south, so this gives positive radial values
         radial_south = 0.5 * np.pi + elevation_rad[south_mask]
-        ax2.scatter(azimuth_rad[south_mask], radial_south, s=point_sizes[south_mask], color='white', alpha=0.8)
+        # Use star colors (already includes alpha), but ensure we have the right shape
+        if star_colors.ndim == 2:
+            colors_south = star_colors[south_mask]
+        else:
+            colors_south = star_colors
+        ax2.scatter(azimuth_rad[south_mask], radial_south, s=point_sizes[south_mask], c=colors_south, edgecolors='none')
         
         # Plot galaxies that are in or cross the southern hemisphere
         for gd in galaxy_data:
