@@ -1493,7 +1493,7 @@ def plot_zone_of_avoidance(ax, target_3d, is_north_hemisphere, disk_thickness_pc
         # Try to create a boundary by finding the convex hull or by sorting
         # For now, use a scatter-based approach with large alpha
         ax.scatter(az_filtered, radial, 
-                  s=50, color='#333333', alpha=0.3, 
+                  s=50, color='#111111', alpha=0.3, 
                   transform=ax.transData, zorder=0, edgecolors='none')
         
         # Also try to create a filled polygon by finding the boundary
@@ -1528,7 +1528,7 @@ def plot_zone_of_avoidance(ax, target_3d, is_north_hemisphere, disk_thickness_pc
                     boundary_rad = np.array(boundary_rad + [boundary_rad[0]])
                     
                     ax.fill(boundary_az, boundary_rad,
-                           color='#333333', alpha=0.4, edgecolor='#444444', linewidth=0.5,
+                           color='#111111', alpha=0.3, edgecolor='#111111', linewidth=0.5,
                            transform=ax.transData, zorder=0)
     except Exception as e:
         # If zone of avoidance calculation fails, just skip it
@@ -1622,6 +1622,53 @@ def plot_sol_reference(ax, azimuth_rad, elevation_rad, is_north_hemisphere):
                    color='orange', fontsize=fontsize, weight='bold',
                    transform=ax.transData, zorder=10)
 
+def calculate_point_size_by_magnitude(magnitude, min_size=1, max_size=10, magnitude_brightest=10):
+    """Calculate point size based on apparent magnitude using linear interpolation.
+    
+    Point sizes are inversely linearly interpolated between min_size and max_size
+    based on magnitude. Brighter stars (lower magnitude values) result in larger point sizes.
+    
+    Args:
+        magnitude: Apparent magnitude (scalar or array). Can be negative for very bright stars.
+        min_size: Minimum point size (default: 1)
+        max_size: Maximum point size (default: 10)
+        magnitude_brightest: Highest magnitude to consider. Magnitudes above this return 0 (default: 10)
+                          Magnitude 0 maps to max_size, magnitude_brightest maps to min_size.
+    
+    Returns:
+        Point size(s) as scalar or array:
+        - Magnitude < 0: max_size
+        - 0 <= magnitude <= magnitude_brightest: linear interpolation from (0, max_size) to (magnitude_brightest, min_size)
+        - Magnitude > magnitude_brightest: 0
+    """
+    magnitude = np.asarray(magnitude)
+    
+    # Initialize output array
+    point_sizes = np.zeros_like(magnitude, dtype=float)
+    
+    # Magnitudes above magnitude_brightest get 0 (should not be plotted)
+    above_brightest = magnitude > magnitude_brightest
+    point_sizes[above_brightest] = 0.0
+    
+    # Magnitudes below 0 get max_size (very bright stars)
+    below_zero = magnitude < 0
+    point_sizes[below_zero] = max_size
+    
+    # Magnitudes between 0 and magnitude_brightest: linear interpolation
+    # At magnitude 0: max_size
+    # At magnitude magnitude_brightest: min_size
+    in_range = (magnitude >= 0) & (magnitude <= magnitude_brightest)
+    if np.any(in_range):
+        mag_range = magnitude_brightest - 0.0
+        size_range = max_size - min_size
+        # Linear interpolation: point_size = max_size - (magnitude - 0) * size_range / mag_range
+        point_sizes[in_range] = max_size - magnitude[in_range] * size_range / mag_range
+    
+    # Return scalar if input was scalar
+    if np.isscalar(magnitude):
+        return float(1.5 ** point_sizes)
+    return point_sizes
+
 def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, apparent_mag_from_target):
     """Plot a bright star with label on a polar plot hemisphere.
     
@@ -1642,12 +1689,14 @@ def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, a
     # Only plot if in this hemisphere
     if (is_north_hemisphere and elevation_rad > 0) or (not is_north_hemisphere and elevation_rad < 0):
         # Calculate point size based on apparent magnitude from target
-        point_size = (7 - apparent_mag_from_target) ** 2.5
-        point_size = max(10, min(200, point_size))  # Clamp between 10 and 200
+        # Use magnitude_brightest=6.5 to match the magnitude filter (m_new < 6.5)
+        point_size = calculate_point_size_by_magnitude(apparent_mag_from_target, min_size=0, max_size=10, magnitude_brightest=6.5)
         
-        # Plot star as a point
-        ax.scatter(azimuth_rad, radial, s=point_size, color='yellow', 
-                  alpha=0.9, edgecolors='orange', linewidths=1, transform=ax.transData)
+        # Only plot if point size is greater than 0
+        if point_size > 0:
+            # Plot star as a point
+            ax.scatter(azimuth_rad, radial, s=point_size, color='yellow', 
+                      alpha=0.9, edgecolors='orange', linewidths=1, transform=ax.transData)
         
         # Add label using ax.annotate with offset points
         fontsize = 7
@@ -1964,7 +2013,8 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     
     # 5. Plotting Northern and Southern Hemispheres based on z-component
     # Scaling for stars
-    point_sizes = (7 - m_plot) ** 2.5
+    # Use magnitude_brightest=6.5 to match the magnitude filter (m_new < 6.5)
+    point_sizes = calculate_point_size_by_magnitude(m_plot, min_size=0, max_size=10, magnitude_brightest=6.5)
 
     # Get bright galaxies, stars, and deep sky objects
     galaxies = get_bright_galaxies()
@@ -2046,7 +2096,9 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
         })
     
     # Northern Hemisphere (z > 0)
-    north_mask = z > 0
+    # Filter out stars with point_sizes <= 0
+    valid_size_mask = point_sizes > 0
+    north_mask = (z > 0) & valid_size_mask
     if np.any(north_mask):
         fig_north = plt.figure(figsize=(24, 24), facecolor='#000005')
         ax1 = fig_north.add_subplot(111, projection='polar')
@@ -2123,7 +2175,8 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
         print(f"Warning: No stars in north hemisphere (z > 0)")
     
     # Southern Hemisphere (z < 0)
-    south_mask = z < 0
+    # Filter out stars with point_sizes <= 0
+    south_mask = (z < 0) & valid_size_mask
     if np.any(south_mask):
         fig_south = plt.figure(figsize=(24, 24), facecolor='#000005')
         ax2 = fig_south.add_subplot(111, projection='polar')
