@@ -10,6 +10,8 @@ import sys
 from astroquery.gaia import Gaia
 from astropy.table import Table
 
+from lib.constants import GAIA_MAX_RETRIES
+
 # Configure your query here
 QUERY = """
 SELECT TOP 10 *
@@ -31,7 +33,7 @@ def table_row_to_dict(row):
             row_dict[colname] = value
     return row_dict
 
-def query_gaia_and_output_json(query, max_retries=3):
+def query_gaia_and_output_json(query, max_retries=GAIA_MAX_RETRIES):
     """
     Execute a GAIA query and output each row as a JSON blob to stdout.
     

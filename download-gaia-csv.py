@@ -13,6 +13,12 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
+from lib.constants import (
+    GAIA_MAX_RETRIES,
+    GAIA_HTTP_TIMEOUT_SECONDS,
+    GAIA_HTTP_HEAD_TIMEOUT_SECONDS,
+)
+
 try:
     from tqdm import tqdm
     HAS_TQDM = True
@@ -62,11 +68,11 @@ def get_file_list():
     print(f"Found {len(files)} CSV.gz files")
     return files
 
-def download_file(url, filepath, max_retries=3):
+def download_file(url, filepath, max_retries=GAIA_MAX_RETRIES):
     """Download a single file with retry logic."""
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, stream=True, timeout=30)
+            response = requests.get(url, stream=True, timeout=GAIA_HTTP_TIMEOUT_SECONDS)
             response.raise_for_status()
             
             total_size = int(response.headers.get('content-length', 0))
@@ -178,7 +184,7 @@ Examples:
             if filepath.exists():
                 # Try to verify it's complete by checking size
                 try:
-                    response = requests.head(url, timeout=10)
+                    response = requests.head(url, timeout=GAIA_HTTP_HEAD_TIMEOUT_SECONDS)
                     expected_size = int(response.headers.get('content-length', 0))
                     actual_size = filepath.stat().st_size
                     if expected_size > 0 and actual_size == expected_size:

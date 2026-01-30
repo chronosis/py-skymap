@@ -11,28 +11,11 @@ def get_bright_galaxies():
 
     Returns list of dicts with: name, ra_deg, dec_deg, major_axis_deg, minor_axis_deg,
     position_angle_deg, apparent_mag, distance_pc.
+    
+    Note: LMC and SMC are excluded from this list as they require special handling
+    based on target star position (see calculate_magellanic_clouds in skymap-gen.py).
     """
     return [
-        {
-            "name": "LMC",
-            "ra_deg": 80.8938,  # Large Magellanic Cloud
-            "dec_deg": -69.7561,
-            "major_axis_deg": 10.75,  # Angular size
-            "minor_axis_deg": 9.33,
-            "position_angle_deg": 0,  # Approximate
-            "apparent_mag": 0.9,
-            "distance_pc": 50_000.0,  # ~163 kly
-        },
-        {
-            "name": "SMC",
-            "ra_deg": 13.1867,  # Small Magellanic Cloud
-            "dec_deg": -72.8286,
-            "major_axis_deg": 5.20,
-            "minor_axis_deg": 3.25,
-            "position_angle_deg": 45,  # Approximate
-            "apparent_mag": 2.7,
-            "distance_pc": 60_000.0,  # ~196 kly
-        },
         {
             "name": "Andromeda",
             "ra_deg": 10.6847,  # M31
@@ -62,6 +45,43 @@ def get_bright_galaxies():
             "position_angle_deg": 0,
             "apparent_mag": 6.2,
             "distance_pc": 10_200.0,  # ~10.2 kpc
+        },
+    ]
+
+
+def get_magellanic_clouds():
+    """Return data for the Large and Small Magellanic Clouds.
+    
+    These nearby dwarf galaxies require special handling because their apparent
+    size and shape change significantly based on the observer's position.
+    
+    Returns list of dicts with: name, ra_deg, dec_deg, major_axis_deg, minor_axis_deg,
+    position_angle_deg, apparent_mag, distance_pc, physical_major_axis_pc, physical_minor_axis_pc.
+    """
+    return [
+        {
+            "name": "LMC",
+            "ra_deg": 80.8938,  # Large Magellanic Cloud
+            "dec_deg": -69.7561,
+            "major_axis_deg": 10.75,  # Angular size from Earth
+            "minor_axis_deg": 9.33,
+            "position_angle_deg": 0,  # Approximate
+            "apparent_mag": 0.9,
+            "distance_pc": 50_000.0,  # ~163 kly
+            "physical_major_axis_pc": 9_400.0,  # Physical size in parsecs (~30 kly)
+            "physical_minor_axis_pc": 8_150.0,  # Physical size in parsecs (~26 kly)
+        },
+        {
+            "name": "SMC",
+            "ra_deg": 13.1867,  # Small Magellanic Cloud
+            "dec_deg": -72.8286,
+            "major_axis_deg": 5.20,  # Angular size from Earth
+            "minor_axis_deg": 3.25,
+            "position_angle_deg": 45,  # Approximate
+            "apparent_mag": 2.7,
+            "distance_pc": 60_000.0,  # ~196 kly
+            "physical_major_axis_pc": 5_440.0,  # Physical size in parsecs (~17.7 kly)
+            "physical_minor_axis_pc": 3_400.0,  # Physical size in parsecs (~11.1 kly)
         },
     ]
 

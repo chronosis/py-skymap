@@ -52,6 +52,7 @@ from lib.star_data import (
     get_bright_galaxies as _stardata_get_bright_galaxies,
     get_bright_stars as _stardata_get_bright_stars,
     get_bright_deep_sky_objects as _stardata_get_bright_deep_sky_objects,
+    get_magellanic_clouds as _stardata_get_magellanic_clouds,
 )
 
 
@@ -500,6 +501,10 @@ def get_bright_galaxies():
     """Return static bright galaxy data from shared star_data module."""
     return _stardata_get_bright_galaxies()
 
+def get_magellanic_clouds():
+    """Return Magellanic Clouds data from shared star_data module."""
+    return _stardata_get_magellanic_clouds()
+
 def get_bright_stars():
     """Return bright star data from shared star_data module."""
     return _stardata_get_bright_stars()
@@ -712,6 +717,185 @@ def calculate_galaxy_coordinates(galaxy, target_3d):
         galaxy_distance_pc,
         use_earth_centric_approx=False
     )
+
+def calculate_magellanic_cloud_coordinates(mc, target_3d):
+    """Calculate azimuth, elevation, and apparent angular size of a Magellanic Cloud from target star's perspective.
+    
+    The apparent size changes based on the distance from the target star to the galaxy.
+    Uses physical dimensions to calculate apparent angular size.
+    
+    Args:
+        mc: Magellanic Cloud dict with physical_major_axis_pc, physical_minor_axis_pc, distance_pc
+        target_3d: SkyCoord of target star position
+    
+    Returns: (azimuth_rad, elevation_rad, z, apparent_major_axis_deg, apparent_minor_axis_deg)
+    """
+    # Get Earth-centric coordinates
+    mc_earth_icrs = SkyCoord(ra=mc['ra_deg']*u.deg, dec=mc['dec_deg']*u.deg, 
+                             distance=mc['distance_pc']*u.pc, frame='icrs')
+    mc_earth_cart = mc_earth_icrs.cartesian.xyz.value  # Shape: (3,)
+    
+    # Get target position
+    target_cart = target_3d.cartesian.xyz.value  # Shape: (3,)
+    
+    # Calculate distance from target to galaxy
+    vector_from_target = mc_earth_cart - target_cart
+    distance_from_target_pc = np.linalg.norm(vector_from_target)
+    
+    # Safety check: avoid division by zero or extremely small distances
+    # If target is very close to galaxy, use Earth-centric angular size as fallback
+    min_distance_pc = 1.0  # Minimum distance threshold (1 pc)
+    if distance_from_target_pc < min_distance_pc:
+        distance_from_target_pc = mc['distance_pc']  # Use Earth distance as fallback
+        # Recalculate vector using Earth-centric distance
+        mc_earth_icrs_unit = SkyCoord(ra=mc['ra_deg']*u.deg, dec=mc['dec_deg']*u.deg, 
+                                      distance=1.0*u.pc, frame='icrs')
+        mc_earth_unit_cart = mc_earth_icrs_unit.cartesian.xyz.value
+        vector_from_target = mc_earth_unit_cart * mc['distance_pc'] - target_cart
+        distance_from_target_pc = np.linalg.norm(vector_from_target)
+        if distance_from_target_pc < min_distance_pc:
+            distance_from_target_pc = mc['distance_pc']
+    
+    # Calculate apparent angular size from target star's perspective
+    # Angular size (radians) = physical size (pc) / distance (pc)
+    # Convert to degrees
+    apparent_major_axis_rad = mc['physical_major_axis_pc'] / distance_from_target_pc
+    apparent_minor_axis_rad = mc['physical_minor_axis_pc'] / distance_from_target_pc
+    apparent_major_axis_deg = np.degrees(apparent_major_axis_rad)
+    apparent_minor_axis_deg = np.degrees(apparent_minor_axis_rad)
+    
+    # Calculate direction (azimuth, elevation) from target to galaxy
+    unit_vector = vector_from_target / distance_from_target_pc
+    x, y, z = unit_vector
+    
+    azimuth_rad = np.arctan2(y, x)
+    azimuth_rad = np.mod(azimuth_rad, 2 * np.pi)  # Normalize to [0, 2π)
+    elevation_rad = np.arcsin(np.clip(z, -1.0, 1.0))
+    
+    return azimuth_rad, elevation_rad, z, apparent_major_axis_deg, apparent_minor_axis_deg
+
+def plot_magellanic_cloud(ax, mc, azimuth_rad, elevation_rad, apparent_major_axis_deg, 
+                          apparent_minor_axis_deg, is_north_hemisphere, clip_to_equator=False):
+    """Plot a Magellanic Cloud as an ellipse on a polar plot hemisphere with dynamic sizing.
+    
+    Args:
+        ax: matplotlib polar axes
+        mc: dict with Magellanic Cloud data
+        azimuth_rad: azimuth of cloud center in radians
+        elevation_rad: elevation of cloud center in radians
+        apparent_major_axis_deg: apparent major axis in degrees (from target star's perspective)
+        apparent_minor_axis_deg: apparent minor axis in degrees (from target star's perspective)
+        is_north_hemisphere: True for north, False for south
+        clip_to_equator: If True, only plot the portion in this hemisphere
+    """
+    # Use the same ellipse plotting logic as plot_galaxy_on_hemisphere, but with dynamic sizes
+    # Calculate radial position on polar plot
+    if is_north_hemisphere:
+        radial_center = 0.5 * np.pi - elevation_rad  # Pole at center
+        equator_radial = 0.5 * np.pi  # Equator is at this radial value
+    else:
+        radial_center = 0.5 * np.pi + elevation_rad  # Pole at center, elevation is negative
+        equator_radial = 0.5 * np.pi  # Equator is at this radial value
+    
+    # Convert angular size to approximate size in plot units
+    major_size_rad = np.radians(apparent_major_axis_deg)
+    minor_size_rad = np.radians(apparent_minor_axis_deg)
+    
+    # Create ellipse by plotting points around perimeter
+    n_points = 256  # More points for smoother ellipse
+    t = np.linspace(0, 2*np.pi, n_points)
+    
+    # Ellipse in local coordinates (semi-major and semi-minor axes)
+    a = major_size_rad / 2  # Semi-major axis
+    b = minor_size_rad / 2  # Semi-minor axis
+    
+    # Parametric ellipse
+    x_local = a * np.cos(t)
+    y_local = b * np.sin(t)
+    
+    # Rotate by position angle
+    pa_rad = np.radians(mc['position_angle_deg'])
+    cos_pa = np.cos(pa_rad)
+    sin_pa = np.sin(pa_rad)
+    x_rot = x_local * cos_pa - y_local * sin_pa
+    y_rot = x_local * sin_pa + y_local * cos_pa
+    
+    # Convert to polar plot coordinates using proper spherical trigonometry
+    # Convert center to unit vector on sphere
+    center_x = np.cos(elevation_rad) * np.cos(azimuth_rad)
+    center_y = np.cos(elevation_rad) * np.sin(azimuth_rad)
+    center_z = np.sin(elevation_rad)
+    center_vec = np.array([center_x, center_y, center_z])
+    
+    # Create local tangent frame vectors at center
+    north_x = -np.sin(elevation_rad) * np.cos(azimuth_rad)
+    north_y = -np.sin(elevation_rad) * np.sin(azimuth_rad)
+    north_z = np.cos(elevation_rad)
+    north_vec = np.array([north_x, north_y, north_z])
+    
+    east_x = -np.sin(azimuth_rad)
+    east_y = np.cos(azimuth_rad)
+    east_z = 0.0
+    east_vec = np.array([east_x, east_y, east_z])
+    
+    # Compute offset vectors for all points at once
+    offset_vecs = (x_rot[:, np.newaxis] * north_vec + 
+                   y_rot[:, np.newaxis] * east_vec)
+    
+    # Project to unit sphere: new_vec = normalize(center_vec + offset_vec)
+    new_vecs = center_vec + offset_vecs
+    new_norms = np.linalg.norm(new_vecs, axis=1, keepdims=True)
+    new_norms = np.where(new_norms > 1e-10, new_norms, 1.0)  # Avoid division by zero
+    new_vecs_normalized = new_vecs / new_norms
+    
+    # Convert back to spherical coordinates (azimuth, elevation)
+    new_x = new_vecs_normalized[:, 0]
+    new_y = new_vecs_normalized[:, 1]
+    new_z = new_vecs_normalized[:, 2]
+    
+    new_azimuth = np.arctan2(new_y, new_x)
+    new_azimuth = np.mod(new_azimuth, 2 * np.pi)  # Wrap to [0, 2π)
+    new_elevation = np.arcsin(np.clip(new_z, -1.0, 1.0))
+    
+    # Convert to polar plot coordinates
+    if is_north_hemisphere:
+        ellipse_radial = 0.5 * np.pi - new_elevation
+    else:
+        ellipse_radial = 0.5 * np.pi + new_elevation
+    
+    ellipse_azimuth = new_azimuth
+    
+    # Filter points within valid hemisphere bounds
+    if is_north_hemisphere:
+        if clip_to_equator:
+            valid = ellipse_radial <= equator_radial
+        else:
+            valid = ellipse_radial >= 0
+    else:
+        if clip_to_equator:
+            valid = ellipse_radial >= equator_radial
+        else:
+            valid = ellipse_radial >= 0
+    
+    if np.any(valid):
+        ellipse_azimuth_plot = ellipse_azimuth[valid]
+        ellipse_radial_plot = ellipse_radial[valid]
+        
+        # Plot ellipse outline (use cyan like other galaxies, or distinct color)
+        ax.plot(ellipse_azimuth_plot, ellipse_radial_plot, 
+                color='cyan', linewidth=2, alpha=0.8, transform=ax.transData)
+        
+        # Add label at center (only if center is in this hemisphere)
+        center_in_hemisphere = (is_north_hemisphere and elevation_rad > 0) or (not is_north_hemisphere and elevation_rad < 0)
+        if center_in_hemisphere or not clip_to_equator:
+            fontsize = 9
+            ax.annotate(mc['name'],
+                       xy=(azimuth_rad, radial_center),
+                       xytext=(0, -10),  # 10 points below
+                       textcoords='offset points',
+                       ha='center', va='top',
+                       color='cyan', fontsize=fontsize, weight='bold',
+                       transform=ax.transData)
 
 def calculate_star_coordinates(star, target_3d):
     """Calculate azimuth and elevation of a bright star from target star's perspective.
@@ -1039,6 +1223,61 @@ def calculate_sol_coordinates(target_3d):
     elevation_rad = np.arcsin(np.clip(z, -1.0, 1.0))
     
     return azimuth_rad, elevation_rad, z
+
+def calculate_sagittarius_a_coordinates(target_3d):
+    """Calculate azimuth and elevation of Sagittarius A* (galactic center) from target star's perspective.
+    
+    Sagittarius A* is at the galactic center:
+    - RA: 266.4168° (17h 45m 40s)
+    - Dec: -29.0078° (-29° 00' 28")
+    - Distance: ~8,000 pc (~26,000 light-years) from Earth
+    
+    Returns: (azimuth_rad, elevation_rad, z)
+    """
+    # Sagittarius A* coordinates
+    sgr_a_ra_deg = 266.4168
+    sgr_a_dec_deg = -29.0078
+    sgr_a_distance_pc = 8000.0  # ~8 kpc from Earth
+    
+    return transform_to_target_frame(
+        target_3d,
+        sgr_a_ra_deg,
+        sgr_a_dec_deg,
+        sgr_a_distance_pc,
+        use_earth_centric_approx=False
+    )
+
+def plot_sagittarius_a_reference(ax, azimuth_rad, elevation_rad, is_north_hemisphere):
+    """Plot Sagittarius A* as a special reference point on a polar plot hemisphere.
+    
+    Args:
+        ax: matplotlib polar axes
+        azimuth_rad: azimuth of Sagittarius A* in radians
+        elevation_rad: elevation of Sagittarius A* in radians
+        is_north_hemisphere: True for north, False for south
+    """
+    # Calculate radial position on polar plot
+    if is_north_hemisphere:
+        radial = 0.5 * np.pi - elevation_rad  # Pole at center
+    else:
+        radial = 0.5 * np.pi + elevation_rad  # Pole at center, elevation is negative
+    
+    # Only plot if in this hemisphere
+    if (is_north_hemisphere and elevation_rad > 0) or (not is_north_hemisphere and elevation_rad < 0):
+        # Plot Sagittarius A* as a special marker (larger, different color)
+        ax.scatter(azimuth_rad, radial, s=300, color='red', 
+                  alpha=1.0, edgecolors='darkred', linewidths=3, 
+                  marker='*', transform=ax.transData, zorder=10)
+        
+        # Add label using ax.annotate with offset points
+        fontsize = 9
+        ax.annotate('Sgr A*',
+                   xy=(azimuth_rad, radial),
+                   xytext=(0, -10),  # 10 points below the star
+                   textcoords='offset points',
+                   ha='center', va='top',
+                   color='red', fontsize=fontsize, weight='bold',
+                   transform=ax.transData, zorder=10)
 
 def plot_sol_reference(ax, azimuth_rad, elevation_rad, is_north_hemisphere):
     """Plot Sol (Sun) as a special reference star on a polar plot hemisphere.
@@ -1508,6 +1747,20 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
             'z': z_gal
         })
     
+    # Calculate Magellanic Clouds coordinates and apparent sizes from target star's perspective
+    magellanic_clouds = get_magellanic_clouds()
+    mc_data = []
+    for mc in magellanic_clouds:
+        az, el, z_mc, apparent_major_deg, apparent_minor_deg = calculate_magellanic_cloud_coordinates(mc, target_3d)
+        mc_data.append({
+            'mc': mc,
+            'azimuth_rad': az,
+            'elevation_rad': el,
+            'z': z_mc,
+            'apparent_major_axis_deg': apparent_major_deg,
+            'apparent_minor_axis_deg': apparent_minor_deg
+        })
+    
     # Calculate bright star coordinates and apparent magnitude from target's perspective
     star_data = []
     for star in bright_stars:
@@ -1620,6 +1873,27 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
             if sol_z > 0:  # Sol is in northern hemisphere
                 plot_sol_reference(ax1, sol_az, sol_el, is_north_hemisphere=True)
         
+        # Plot Sagittarius A* as reference point (if target is not Sagittarius A*)
+        sgr_a_az, sgr_a_el, sgr_a_z = calculate_sagittarius_a_coordinates(target_3d)
+        if sgr_a_z > 0:  # Sagittarius A* is in northern hemisphere
+            plot_sagittarius_a_reference(ax1, sgr_a_az, sgr_a_el, is_north_hemisphere=True)
+        
+        # Plot Magellanic Clouds in or crossing northern hemisphere
+        for mc_d in mc_data:
+            mc_center_elevation = mc_d['elevation_rad']
+            mc_major_rad = np.radians(mc_d['apparent_major_axis_deg'] / 2)
+            mc_top_elevation = mc_center_elevation + mc_major_rad
+            mc_bottom_elevation = mc_center_elevation - mc_major_rad
+            
+            if mc_top_elevation > 0:
+                crosses_equator = mc_bottom_elevation < 0
+                plot_magellanic_cloud(ax1, mc_d['mc'], mc_d['azimuth_rad'], 
+                                     mc_center_elevation,
+                                     mc_d['apparent_major_axis_deg'],
+                                     mc_d['apparent_minor_axis_deg'],
+                                     is_north_hemisphere=True,
+                                     clip_to_equator=crosses_equator)
+        
         # Plot bright stars in northern hemisphere
         for sd in star_data:
             if sd['z'] > 0:  # Star is in northern hemisphere
@@ -1704,6 +1978,27 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
             if sol_z < 0:  # Sol is in southern hemisphere
                 plot_sol_reference(ax2, sol_az, sol_el, is_north_hemisphere=False)
         
+        # Plot Sagittarius A* as reference point
+        sgr_a_az, sgr_a_el, sgr_a_z = calculate_sagittarius_a_coordinates(target_3d)
+        if sgr_a_z < 0:  # Sagittarius A* is in southern hemisphere
+            plot_sagittarius_a_reference(ax2, sgr_a_az, sgr_a_el, is_north_hemisphere=False)
+        
+        # Plot Magellanic Clouds in or crossing southern hemisphere
+        for mc_d in mc_data:
+            mc_center_elevation = mc_d['elevation_rad']
+            mc_major_rad = np.radians(mc_d['apparent_major_axis_deg'] / 2)
+            mc_top_elevation = mc_center_elevation + mc_major_rad
+            mc_bottom_elevation = mc_center_elevation - mc_major_rad
+            
+            if mc_bottom_elevation < 0:
+                crosses_equator = mc_top_elevation > 0
+                plot_magellanic_cloud(ax2, mc_d['mc'], mc_d['azimuth_rad'], 
+                                     mc_center_elevation,
+                                     mc_d['apparent_major_axis_deg'],
+                                     mc_d['apparent_minor_axis_deg'],
+                                     is_north_hemisphere=False,
+                                     clip_to_equator=crosses_equator)
+        
         # Plot bright stars in southern hemisphere
         for sd in star_data:
             if sd['z'] < 0:  # Star is in southern hemisphere
@@ -1782,6 +2077,30 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                 c=colors_west,
                 edgecolors='none',
             )
+
+        # Plot Sol as reference star (if target is not Sol, full sky view)
+        if target_star_name.strip().lower() not in ('sol', 'sun'):
+            sol_az, sol_el, sol_z = calculate_sol_coordinates(target_3d)
+            if sol_el > -np.pi/2 and sol_el < np.pi/2:  # Within visible range
+                plot_sol_reference(ax_ew, sol_az, sol_el, is_north_hemisphere=True)
+        
+        # Plot Sagittarius A* as reference point (full sky view)
+        sgr_a_az, sgr_a_el, sgr_a_z = calculate_sagittarius_a_coordinates(target_3d)
+        # Use north hemisphere plotting logic for full sky (radial_full uses north convention)
+        if sgr_a_el > -np.pi/2 and sgr_a_el < np.pi/2:  # Within visible range
+            plot_sagittarius_a_reference(ax_ew, sgr_a_az, sgr_a_el, is_north_hemisphere=True)
+        
+        # Plot Magellanic Clouds (full sky view)
+        for mc_d in mc_data:
+            mc_center_elevation = mc_d['elevation_rad']
+            # Plot if visible in full sky view
+            if mc_center_elevation > -np.pi/2 and mc_center_elevation < np.pi/2:
+                plot_magellanic_cloud(ax_ew, mc_d['mc'], mc_d['azimuth_rad'], 
+                                     mc_center_elevation,
+                                     mc_d['apparent_major_axis_deg'],
+                                     mc_d['apparent_minor_axis_deg'],
+                                     is_north_hemisphere=True,
+                                     clip_to_equator=False)
 
         ax_ew.set_title(f"East / West Hemispheres\nFrom {target_star_name}", color='white', pad=20)
         ax_ew.set_facecolor('#000005')

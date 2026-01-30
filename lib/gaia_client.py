@@ -13,7 +13,7 @@ def _extract_gaia_data_from_table(table: Table):
 
     Args:
         table: Astropy Table with columns: source_id, ra, dec, parallax,
-               phot_g_mean_mag, bp_rp
+               phot_g_mean_mag, bp_rp, phot_bp_mean_mag, phot_rp_mean_mag
 
     Returns:
         List of tuples: [(source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp), ...]
@@ -23,13 +23,21 @@ def _extract_gaia_data_from_table(table: Table):
         return col.value if hasattr(col, "value") else col
 
     def get_bp_rp(row):
-        """Get bp_rp value, handling missing data."""
+        """Compute bp_rp: use bp_rp if valid, else phot_bp_mean_mag - phot_rp_mean_mag."""
         if "bp_rp" in row.colnames:
             try:
                 val = get_value(row["bp_rp"])
                 val_float = float(val)
                 if np.isfinite(val_float):
                     return val_float
+            except (ValueError, TypeError):
+                pass
+        if "phot_bp_mean_mag" in row.colnames and "phot_rp_mean_mag" in row.colnames:
+            try:
+                bp = get_value(row["phot_bp_mean_mag"])
+                rp = get_value(row["phot_rp_mean_mag"])
+                if np.isfinite(float(bp)) and np.isfinite(float(rp)):
+                    return float(bp) - float(rp)
             except (ValueError, TypeError):
                 pass
         return None
@@ -124,7 +132,7 @@ def _download_from_gaia(cache_db: Path, chunk_size: int, star_limit=None, existi
 
             query = f"""
             SELECT TOP {chunk_size} source_id, ra, dec, parallax, phot_g_mean_mag,
-                   COALESCE(bp_rp, phot_bp_mean_mag - phot_rp_mean_mag) AS bp_rp
+                   bp_rp, phot_bp_mean_mag, phot_rp_mean_mag
             FROM gaiadr3.gaia_source
             WHERE phot_g_mean_mag IS NOT NULL AND phot_rp_mean_mag < 16
             ORDER BY random_index
@@ -207,3 +215,6 @@ def _download_from_gaia(cache_db: Path, chunk_size: int, star_limit=None, existi
             pbar.close()
         conn.close()
 
+    # Return the total number of stars now present in the cache. This matches
+    # the contract expected by callers such as ensure_cache_populated.
+    return stars_inserted
