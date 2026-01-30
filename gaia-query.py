@@ -14,8 +14,9 @@ from lib.constants import GAIA_MAX_RETRIES
 
 # Configure your query here
 QUERY = """
-SELECT TOP 10 *
+SELECT TOP 1 *
 FROM gaiadr3.gaia_source
+ORDER BY phot_g_mean_mag DESC
 """
 
 def table_row_to_dict(row):
