@@ -12,7 +12,7 @@ CACHE_DB: Path = Path("gaia_cache/gaia_cache.db")
 IMAGES_DIR: Path = Path("images")
 
 # Gaia download defaults
-CHUNK_SIZE: int = 2_500  # Stars per chunk (reduced to avoid timeouts)
+CHUNK_SIZE: int = 1_000_000  # Stars per chunk (reduced to avoid timeouts)
 DEFAULT_STAR_LIMIT: int = 50_000  # Default number of stars to download
 
 # Gaia network / retry behaviour
@@ -28,7 +28,7 @@ GAIA_HTTP_HEAD_TIMEOUT_SECONDS: int = 10
 
 # Distance / background classification
 ASSUMED_BACKGROUND_DISTANCE_PC: float = 10_000_000.0  # 10 Mpc for effectively infinite distance
-BRIGHT_BACKGROUND_ABS_MAG_THRESHOLD: float = 10.0
+BRIGHT_BACKGROUND_ABS_MAG_THRESHOLD: float = 12.5
 BACKGROUND_DISTANCE_THRESHOLD_PC: float = 100_000.0  # Stars beyond this are treated as background
 MAX_DISTANCE_PC: float = 1e6  # General upper sanity bound for distances
 

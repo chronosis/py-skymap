@@ -1,9 +1,11 @@
+import time
 from pathlib import Path
 
 from astroquery.gaia import Gaia
 from astropy.table import Table
 import numpy as np
 
+from .constants import GAIA_MAX_RETRIES
 from .sqlite_helper import init_database
 from .progress import HAS_TQDM, tqdm
 
@@ -139,11 +141,26 @@ def _download_from_gaia(cache_db: Path, chunk_size: int, star_limit=None, existi
             OFFSET {offset}
             """
 
-            try:
-                job = Gaia.launch_job(query)
-                results = job.get_results()
-            except Exception as e:
-                print(f"  Error during Gaia query: {e}")
+            results = None
+            last_error = None
+            for attempt in range(GAIA_MAX_RETRIES):
+                try:
+                    # Use async to avoid 408: sync jobs timeout on ORDER BY random_index + OFFSET.
+                    job = Gaia.launch_job_async(query)
+                    results = job.get_results()
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    is_408 = "408" in str(e) or (getattr(e, "response", None) and getattr(getattr(e, "response", None), "status_code", None) == 408)
+                    if is_408 and attempt < GAIA_MAX_RETRIES - 1:
+                        wait_s = (attempt + 1) * 5
+                        print(f"  Gaia job timeout (408), retrying in {wait_s}s (attempt {attempt + 1}/{GAIA_MAX_RETRIES})...")
+                        time.sleep(wait_s)
+                    else:
+                        print(f"  Error during Gaia query: {e}")
+                        break
+            if last_error is not None:
                 break
 
             if len(results) == 0:
