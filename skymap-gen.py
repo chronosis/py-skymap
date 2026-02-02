@@ -2175,6 +2175,7 @@ def main():
         epilog=f"""
 Examples:
   {sys.argv[0]} HD118246                    # Generate maps with ~{DEFAULT_STAR_LIMIT:,} stars (default)
+  {sys.argv[0]} "Sol,Aldebaran,Proxima Centauri"  # Multiple stars (comma-separated; quote names with spaces)
   {sys.argv[0]} HD118246 100000             # Generate maps with ~100,000 stars
   {sys.argv[0]} Sol 50000 --magnitude-limit 13  # Include stars up to magnitude 13
   {sys.argv[0]} Sol 50000 --dump-positions  # Dump 3D positions for Sol (no images); verify calc
@@ -2183,7 +2184,7 @@ Examples:
     parser.add_argument(
         'target_star',
         type=str,
-        help='Target star name (e.g., HD118246)'
+        help='Target star name(s), comma-separated. Quote names with spaces (e.g., "Sol,Aldebaran,Proxima Centauri")'
     )
     parser.add_argument(
         'stars',
@@ -2211,13 +2212,24 @@ Examples:
     )
     args = parser.parse_args()
     
-    generate_galactic_hemispheres(
-        args.target_star, 
-        force_refresh=args.force_refresh,
-        star_limit=args.stars,
-        dump_positions=args.dump_positions,
-        magnitude_limit=args.magnitude_limit
-    )
+    # Parse comma-separated target stars; strip whitespace and surrounding quotes
+    target_stars = []
+    for part in args.target_star.split(','):
+        name = part.strip().strip('"\'')
+        if name:
+            target_stars.append(name)
+    
+    if not target_stars:
+        parser.error("At least one target star name is required")
+    
+    for target_star_name in target_stars:
+        generate_galactic_hemispheres(
+            target_star_name,
+            force_refresh=args.force_refresh,
+            star_limit=args.stars,
+            dump_positions=args.dump_positions,
+            magnitude_limit=args.magnitude_limit
+        )
 
 if __name__ == "__main__":
     main()

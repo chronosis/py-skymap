@@ -5,7 +5,7 @@ from astroquery.gaia import Gaia
 from astropy.table import Table
 import numpy as np
 
-from .constants import GAIA_MAX_RETRIES
+from .constants import GAIA_MAX_RETRIES, GAIA_MIN_MAGNITUDE_THRESHOLD
 from .sqlite_helper import init_database
 from .progress import HAS_TQDM, tqdm
 
@@ -136,7 +136,7 @@ def _download_from_gaia(cache_db: Path, chunk_size: int, star_limit=None, existi
             SELECT TOP {chunk_size} source_id, ra, dec, parallax, phot_g_mean_mag,
                    bp_rp, phot_bp_mean_mag, phot_rp_mean_mag
             FROM gaiadr3.gaia_source
-            WHERE phot_g_mean_mag IS NOT NULL AND phot_rp_mean_mag < 16
+            WHERE phot_g_mean_mag IS NOT NULL AND phot_rp_mean_mag < {GAIA_MIN_MAGNITUDE_THRESHOLD}
             ORDER BY random_index
             OFFSET {offset}
             """

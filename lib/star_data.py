@@ -847,17 +847,6 @@ def get_bright_deep_sky_objects():
             "distance_pc": 7100.0,
         },  # ~7.1 kpc
         {
-            "name": "M3",
-            "ra_deg": 205.5483,
-            "dec_deg": 28.3772,
-            "major_axis_deg": 0.25,
-            "minor_axis_deg": 0.25,
-            "position_angle_deg": 0,
-            "apparent_mag": 6.2,
-            "object_type": "globular",
-            "distance_pc": 10_200.0,
-        },  # ~10.2 kpc
-        {
             "name": "M5",
             "ra_deg": 229.6383,
             "dec_deg": 2.0811,
@@ -925,7 +914,7 @@ def get_bright_deep_sky_objects():
         },  # ~8.3 kpc
         # Open Clusters
         {
-            "name": "Pleiades",
+            "name": "Pleiades (M45)",
             "ra_deg": 56.8711,
             "dec_deg": 24.1053,
             "major_axis_deg": 2.0,
@@ -1000,17 +989,6 @@ def get_bright_deep_sky_objects():
             "apparent_mag": 5.8,
             "object_type": "cluster",
             "distance_pc": 6100.0,
-        },  # ~6.1 kpc
-        {
-            "name": "M45",
-            "ra_deg": 56.8711,
-            "dec_deg": 24.1053,
-            "major_axis_deg": 2.0,
-            "minor_axis_deg": 2.0,
-            "position_angle_deg": 0,
-            "apparent_mag": 1.6,
-            "object_type": "cluster",
-            "distance_pc": 135.0,
-        },  # Pleiades, same as above
+        }  # ~6.1 kpc
     ]
 

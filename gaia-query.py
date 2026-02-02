@@ -16,7 +16,7 @@ from lib.constants import GAIA_MAX_RETRIES
 QUERY = """
 SELECT TOP 1 *
 FROM gaiadr3.gaia_source
-ORDER BY phot_g_mean_mag DESC
+ORDER BY phot_g_mean_mag ASC
 """
 
 def table_row_to_dict(row):
@@ -54,7 +54,8 @@ def query_gaia_and_output_json(query, max_retries=GAIA_MAX_RETRIES):
     
     while retry_count < max_retries:
         try:
-            job = Gaia.launch_job(query)
+            # Use async to avoid 408 on heavier queries (same as lib/gaia_client.py).
+            job = Gaia.launch_job_async(query)
             results = job.get_results()
             break  # Success, exit retry loop
         except Exception as e:

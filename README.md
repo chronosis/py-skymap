@@ -9,7 +9,8 @@ Generate galactic hemisphere maps centered on any target star using Gaia DR3 dat
 - **Custom Star Perspectives**: View the sky from any star's perspective, not just Earth
 - **Known Objects**: Includes 100+ bright stars, galaxies (LMC, SMC, Andromeda, Triangulum), and deep-sky objects (nebulas, clusters)
 - **Dynamic Reference**: Automatically includes Sol (the Sun) as a reference point when viewing from other stars
-- **High-Quality Output**: Generates 24x24 inch PNG images with proper star magnitudes and object labeling
+- **High-Quality Output**: Generates PNG images at 24"×24" @ 150 DPI by default, with proper star magnitudes and object labeling
+- **Proportional Labeling**: Text sizes scale with image dimensions; semi-transparent black stroke for legibility on varied backgrounds
 
 ## Requirements
 
@@ -64,24 +65,28 @@ poetry run python skymap-gen.py <target_star> [stars]
 
 ```bash
 # Generate maps with default 50,000 stars in cache
-poetry run python skymap-gen.py Aldeberan
+poetry run python skymap-gen.py Aldebaran
 
 # Generate maps with 100,000 stars in cache
-poetry run python skymap-gen.py Aldeberan 100000
+poetry run python skymap-gen.py Aldebaran 100000
 
 # Generate maps for Sol (the Sun)
 poetry run python skymap-gen.py Sol
 
-# Generate maps for Proxima Centauri
+# Generate maps for Proxima Centauri (quote names with spaces)
 poetry run python skymap-gen.py "Proxima Centauri"
+
+# Generate maps for multiple stars (comma-separated)
+poetry run python skymap-gen.py "Sol,Aldebaran,Proxima Centauri" 100000
 ```
 
 ### Command-Line Options
 
-- `target_star`: Name of the target star (required). Can be:
+- `target_star`: Name of the target star(s) (required). Can be:
   - HD catalog number (e.g., `HD100000`)
   - Common name (e.g., `Sol`, `Proxima Centauri`, `Alpha Centauri`)
   - Any name resolvable by Gaia Archive
+  - **Multiple stars**: Comma-separated list; wrap the whole list in quotes. Quote individual names with spaces (e.g., `"Sol,Aldebaran,Proxima Centauri"`)
   
 - `stars`: Number of stars to download from Gaia (optional, default: 50,000)
   - Higher numbers provide more detail but take longer to download and process
@@ -97,13 +102,18 @@ poetry run python skymap-gen.py "Proxima Centauri"
   poetry run python skymap-gen.py Sol 50000 --dump-positions
   ```
 
+- `--magnitude-limit`: Faintest magnitude to render (overrides default from constants)
+  ```bash
+  poetry run python skymap-gen.py Sol 50000 --magnitude-limit 13
+  ```
+
 ### Output
 
 The script generates two PNG files in the `./images/` directory:
 - `images/<target_star>_north_hemisphere.png` - Northern galactic hemisphere
 - `images/<target_star>_south_hemisphere.png` - Southern galactic hemisphere
 
-The `images/` directory is created automatically if it doesn't exist. Images are 24x24 inches at 150 DPI, suitable for printing or detailed viewing.
+The `images/` directory is created automatically if it doesn't exist. By default, images are 24"×24" at 150 DPI (3600×3600 pixels), suitable for printing or detailed viewing.
 
 ## Data Management
 
