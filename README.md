@@ -139,6 +139,8 @@ The `images/` directory is created automatically if it doesn't exist. By default
 - [Polaris](images/Polaris_north_hemisphere.png)
 - [Proxima Centauri](images/Proxima%20Centauri_north_hemisphere.png)
 
+*These example images were generated using ~101M stars (about 10% of Gaia DR3) in the local cache (magnitude ≤16) and a visibility limit of 11.5.*
+
 ## Data Management
 
 ### SQLite Cache
