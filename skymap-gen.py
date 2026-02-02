@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.colors as mcolors
+import matplotlib.patheffects as patheffects
 import os
 import sys
 import time
@@ -29,6 +31,13 @@ from lib.constants import (
     STAR_POINT_MAX_SIZE,
     STAR_POINT_MIN_ALPHA,
     STAR_POINT_MAX_ALPHA,
+    FIGURE_SIZE_INCHES,
+    LABEL_FONT_SIZE_RATIO_SMALL,
+    LABEL_FONT_SIZE_RATIO_MED,
+    LABEL_FONT_SIZE_RATIO_LARGE,
+    TEXT_STROKE_LINEWIDTH,
+    TEXT_STROKE_COLOR,
+    TEXT_STROKE_ALPHA,
 )
 from lib.sqlite_helper import (
     init_database as _sqlite_init_database,
@@ -54,6 +63,20 @@ from lib.star_data import (
     get_bright_deep_sky_objects as _stardata_get_bright_deep_sky_objects,
     get_magellanic_clouds as _stardata_get_magellanic_clouds,
 )
+
+
+def _label_font_size(ratio):
+    """Font size proportional to figure dimensions."""
+    return ratio * FIGURE_SIZE_INCHES
+
+
+def _text_stroke_effects():
+    """Semi-transparent black 1-pixel stroke for text legibility."""
+    stroke_color = (*mcolors.to_rgb(TEXT_STROKE_COLOR), TEXT_STROKE_ALPHA)
+    return [
+        patheffects.withStroke(linewidth=TEXT_STROKE_LINEWIDTH, foreground=stroke_color),
+        patheffects.Normal(),
+    ]
 
 
 def bp_rp_to_rgb(bp_rp, alpha=0.3):
@@ -274,14 +297,16 @@ def _download_from_gaia(star_limit=None, existing_count=0):
         existing_count=existing_count,
     )
 
-def process_star_chunk(chunk_data, target_3d, dump_positions=False):
+def process_star_chunk(chunk_data, target_3d, dump_positions=False, magnitude_limit=None):
     """Process a chunk of stars and return valid stars for plotting or dumping.
     
     Handles both nearby stars (with valid parallax) and background stars
     (with 0 or invalid parallax) by using a large assumed distance.
     
-    If dump_positions=True, magnitude filter (m_new < 6.5) is skipped so all
-    valid stars are returned for database output.
+    If dump_positions=True, magnitude filter is skipped so all valid stars
+    are returned for database output.
+    
+    magnitude_limit: faintest magnitude to include (uses VISIBLE_MAG_LIMIT if None).
     """
     # Extract values and handle units properly
     source_ids = np.asarray(chunk_data['source_id'])
@@ -451,10 +476,11 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False):
     )
     
     # Filter by apparent magnitude (visible stars) and valid coordinates, unless dumping
+    mag_limit = magnitude_limit if magnitude_limit is not None else VISIBLE_MAG_LIMIT
     if dump_positions:
         final_mask = np.isfinite(m_new) & valid_coord_check
     else:
-        final_mask = (m_new < VISIBLE_MAG_LIMIT) & np.isfinite(m_new) & valid_coord_check
+        final_mask = (m_new < mag_limit) & np.isfinite(m_new) & valid_coord_check
     
     if not np.any(final_mask):
         return None
@@ -675,15 +701,15 @@ def plot_galaxy_on_hemisphere(ax, galaxy, azimuth_rad, elevation_rad, is_north_h
         # Offset down for cyan galaxies
         center_in_hemisphere = (is_north_hemisphere and elevation_rad > 0) or (not is_north_hemisphere and elevation_rad < 0)
         if center_in_hemisphere or not clip_to_equator:
-            fontsize = 9
-            # Use ax.annotate with offset points for proper label positioning
-            ax.annotate(galaxy['name'],
-                       xy=(azimuth_rad, radial_center),
-                       xytext=(0, -10),  # 10 points below the star
-                       textcoords='offset points',
-                       ha='center', va='top',
-                       color='cyan', fontsize=fontsize, weight='bold',
-                       transform=ax.transData)
+            fontsize = _label_font_size(LABEL_FONT_SIZE_RATIO_LARGE)
+            ann = ax.annotate(galaxy['name'],
+                             xy=(azimuth_rad, radial_center),
+                             xytext=(0, -10),  # 10 points below the star
+                             textcoords='offset points',
+                             ha='center', va='top',
+                             color='cyan', fontsize=fontsize, weight='bold',
+                             transform=ax.transData)
+            ann.set_path_effects(_text_stroke_effects())
 
 def get_relative_coords(target_xyz, object_xyz):
     """Delegate to shared math helper."""
@@ -888,14 +914,15 @@ def plot_magellanic_cloud(ax, mc, azimuth_rad, elevation_rad, apparent_major_axi
         # Add label at center (only if center is in this hemisphere)
         center_in_hemisphere = (is_north_hemisphere and elevation_rad > 0) or (not is_north_hemisphere and elevation_rad < 0)
         if center_in_hemisphere or not clip_to_equator:
-            fontsize = 9
-            ax.annotate(mc['name'],
-                       xy=(azimuth_rad, radial_center),
-                       xytext=(0, -10),  # 10 points below
-                       textcoords='offset points',
-                       ha='center', va='top',
-                       color='cyan', fontsize=fontsize, weight='bold',
-                       transform=ax.transData)
+            fontsize = _label_font_size(LABEL_FONT_SIZE_RATIO_LARGE)
+            ann = ax.annotate(mc['name'],
+                             xy=(azimuth_rad, radial_center),
+                             xytext=(0, -10),  # 10 points below
+                             textcoords='offset points',
+                             ha='center', va='top',
+                             color='cyan', fontsize=fontsize, weight='bold',
+                             transform=ax.transData)
+            ann.set_path_effects(_text_stroke_effects())
 
 def calculate_star_coordinates(star, target_3d):
     """Calculate azimuth and elevation of a bright star from target star's perspective.
@@ -1270,14 +1297,15 @@ def plot_sagittarius_a_reference(ax, azimuth_rad, elevation_rad, is_north_hemisp
                   marker='*', transform=ax.transData, zorder=10)
         
         # Add label using ax.annotate with offset points
-        fontsize = 9
-        ax.annotate('Sgr A*',
-                   xy=(azimuth_rad, radial),
-                   xytext=(0, -10),  # 10 points below the star
-                   textcoords='offset points',
-                   ha='center', va='top',
-                   color='red', fontsize=fontsize, weight='bold',
-                   transform=ax.transData, zorder=10)
+        fontsize = _label_font_size(LABEL_FONT_SIZE_RATIO_LARGE)
+        ann = ax.annotate('Sgr A*',
+                         xy=(azimuth_rad, radial),
+                         xytext=(0, -10),  # 10 points below the star
+                         textcoords='offset points',
+                         ha='center', va='top',
+                         color='red', fontsize=fontsize, weight='bold',
+                         transform=ax.transData, zorder=10)
+        ann.set_path_effects(_text_stroke_effects())
 
 def plot_sol_reference(ax, azimuth_rad, elevation_rad, is_north_hemisphere):
     """Plot Sol (Sun) as a special reference star on a polar plot hemisphere.
@@ -1302,14 +1330,15 @@ def plot_sol_reference(ax, azimuth_rad, elevation_rad, is_north_hemisphere):
                   marker='*', transform=ax.transData, zorder=10)
         
         # Add label using ax.annotate with offset points
-        fontsize = 9
-        ax.annotate('Sol',
-                   xy=(azimuth_rad, radial),
-                   xytext=(0, -10),  # 10 points below the star
-                   textcoords='offset points',
-                   ha='center', va='top',
-                   color='orange', fontsize=fontsize, weight='bold',
-                   transform=ax.transData, zorder=10)
+        fontsize = _label_font_size(LABEL_FONT_SIZE_RATIO_LARGE)
+        ann = ax.annotate('Sol',
+                         xy=(azimuth_rad, radial),
+                         xytext=(0, -10),  # 10 points below the star
+                         textcoords='offset points',
+                         ha='center', va='top',
+                         color='orange', fontsize=fontsize, weight='bold',
+                         transform=ax.transData, zorder=10)
+        ann.set_path_effects(_text_stroke_effects())
 
 def calculate_point_size_by_magnitude(magnitude, min_size=1, max_size=10, magnitude_brightest=10):
     """Delegate to shared point-size helper."""
@@ -1320,7 +1349,7 @@ def calculate_point_size_by_magnitude(magnitude, min_size=1, max_size=10, magnit
         magnitude_brightest=magnitude_brightest,
     )
 
-def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, apparent_mag_from_target):
+def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, apparent_mag_from_target, magnitude_limit=None):
     """Plot a bright star with label on a polar plot hemisphere.
     
     Args:
@@ -1330,7 +1359,9 @@ def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, a
         elevation_rad: elevation of star in radians
         is_north_hemisphere: True for north, False for south
         apparent_mag_from_target: Apparent magnitude from target star's perspective
+        magnitude_limit: faintest magnitude for sizing (uses VISIBLE_MAG_LIMIT if None)
     """
+    mag_limit = magnitude_limit if magnitude_limit is not None else VISIBLE_MAG_LIMIT
     # Calculate radial position on polar plot
     if is_north_hemisphere:
         radial = 0.5 * np.pi - elevation_rad  # Pole at center
@@ -1345,7 +1376,7 @@ def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, a
             apparent_mag_from_target,
             min_size=STAR_POINT_MIN_SIZE,
             max_size=STAR_POINT_MAX_SIZE,
-            magnitude_brightest=VISIBLE_MAG_LIMIT
+            magnitude_brightest=mag_limit
         )
         
         # Only plot if point size is greater than 0
@@ -1355,14 +1386,15 @@ def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, a
                       alpha=0.9, edgecolors='orange', linewidths=1, transform=ax.transData, zorder=10)
         
         # Add label using ax.annotate with offset points
-        fontsize = 7
-        ax.annotate(star['name'],
-                   xy=(azimuth_rad, radial),
-                   xytext=(0, -10),  # 10 points below the star
-                   textcoords='offset points',
-                   ha='center', va='top',
-                   color='yellow', fontsize=fontsize, weight='bold',
-                   transform=ax.transData)
+        fontsize = _label_font_size(LABEL_FONT_SIZE_RATIO_SMALL)
+        ann = ax.annotate(star['name'],
+                         xy=(azimuth_rad, radial),
+                         xytext=(0, -10),  # 10 points below the star
+                         textcoords='offset points',
+                         ha='center', va='top',
+                         color='yellow', fontsize=fontsize, weight='bold',
+                         transform=ax.transData)
+        ann.set_path_effects(_text_stroke_effects())
 
 def plot_dso_on_hemisphere(ax, dso, azimuth_rad, elevation_rad, is_north_hemisphere, clip_to_equator=False):
     """Plot a deep sky object (nebula, cluster) as an ellipse on a polar plot hemisphere.
@@ -1492,22 +1524,24 @@ def plot_dso_on_hemisphere(ax, dso, azimuth_rad, elevation_rad, is_north_hemisph
         # Add label at center - offset down for magenta (globular), cyan (nebula), and lime (cluster)
         center_in_hemisphere = (is_north_hemisphere and elevation_rad > 0) or (not is_north_hemisphere and elevation_rad < 0)
         if center_in_hemisphere or not clip_to_equator:
-            fontsize = 8
+            fontsize = _label_font_size(LABEL_FONT_SIZE_RATIO_MED)
             # Use ax.annotate with offset points for proper label positioning
             # Offset down for magenta (globular clusters), cyan (nebulas), and lime (open clusters)
             if color == 'magenta' or color == 'cyan' or color == 'lime':
                 offset_y = -10  # 10 points below
             else:
                 offset_y = 0  # No offset
-            ax.annotate(dso['name'],
-                       xy=(azimuth_rad, radial_center),
-                       xytext=(0, offset_y),
-                       textcoords='offset points',
-                       ha='center', va='top' if offset_y < 0 else 'center',
-                       color=color, fontsize=fontsize, weight='bold',
-                       transform=ax.transData)
+            ann = ax.annotate(dso['name'],
+                             xy=(azimuth_rad, radial_center),
+                             xytext=(0, offset_y),
+                             textcoords='offset points',
+                             ha='center', va='top' if offset_y < 0 else 'center',
+                             color=color, fontsize=fontsize, weight='bold',
+                             transform=ax.transData)
+            ann.set_path_effects(_text_stroke_effects())
 
-def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_refresh=False, star_limit=None, dump_positions=False):
+def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_refresh=False, star_limit=None, dump_positions=False, magnitude_limit=None):
+    mag_limit = magnitude_limit if magnitude_limit is not None else VISIBLE_MAG_LIMIT
     print(f"--- Processing {target_star_name} ---")
     if dump_positions:
         print("Mode: dump positions to DB (no images)")
@@ -1598,7 +1632,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                 break
             chunk_size = len(chunk_data)
             
-            result = process_star_chunk(chunk_data, target_3d, dump_positions=dump_positions)
+            result = process_star_chunk(chunk_data, target_3d, dump_positions=dump_positions, magnitude_limit=mag_limit)
             
             if result is not None:
                 n = len(result['azimuth_rad'])
@@ -1677,17 +1711,17 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     
     # Convert BP-RP color index to RGB colors with magnitude-based transparency.
     # Stars brighter than VISIBLE_MAG_TRANSPARENCY_LIMIT are fully opaque.
-    # Stars at VISIBLE_MAG_LIMIT are rendered at 10% opacity (very faint).
+    # Stars at mag_limit are rendered at 10% opacity (very faint).
     alpha = np.ones_like(m_plot, dtype=float)
     bright_mask = m_plot <= VISIBLE_MAG_TRANSPARENCY_LIMIT
-    faint_mask = m_plot >= VISIBLE_MAG_LIMIT
+    faint_mask = m_plot >= mag_limit
     mid_mask = (~bright_mask) & (~faint_mask)
 
     alpha[bright_mask] = STAR_POINT_MAX_ALPHA
     alpha[faint_mask] = STAR_POINT_MIN_ALPHA
     if np.any(mid_mask):
         # Linearly interpolate opacity between the two thresholds
-        span = VISIBLE_MAG_LIMIT - VISIBLE_MAG_TRANSPARENCY_LIMIT
+        span = mag_limit - VISIBLE_MAG_TRANSPARENCY_LIMIT
         frac = (m_plot[mid_mask] - VISIBLE_MAG_TRANSPARENCY_LIMIT) / span
         alpha[mid_mask] = STAR_POINT_MAX_ALPHA - frac * (STAR_POINT_MAX_ALPHA - STAR_POINT_MIN_ALPHA)
     
@@ -1803,8 +1837,8 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
         else:
             apparent_mag_from_target = star['apparent_mag']
         
-        # Only include stars that are bright enough (magnitude <= VISIBLE_MAG_LIMIT, same as regular stars)
-        if apparent_mag_from_target <= VISIBLE_MAG_LIMIT:
+        # Only include stars that are bright enough (magnitude <= mag_limit, same as regular stars)
+        if apparent_mag_from_target <= mag_limit:
             star_data.append({
                 'star': star,
                 'azimuth_rad': az,
@@ -1899,7 +1933,8 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
             if sd['z'] > 0:  # Star is in northern hemisphere
                 plot_star_label(ax1, sd['star'], sd['azimuth_rad'], 
                                sd['elevation_rad'], is_north_hemisphere=True, 
-                               apparent_mag_from_target=sd['apparent_mag_from_target'])
+                               apparent_mag_from_target=sd['apparent_mag_from_target'],
+                               magnitude_limit=mag_limit)
         
         # Plot DSOs in or crossing northern hemisphere
         for dso_d in dso_data:
@@ -1916,10 +1951,15 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                                        is_north_hemisphere=True, 
                                        clip_to_equator=crosses_equator)
         
-        ax1.set_title(f"North Hemisphere\nFrom {target_star_name}", color='white', pad=20)
+        title1 = ax1.set_title(f"North Hemisphere\nFrom {target_star_name}", color='white', pad=20,
+                               fontsize=_label_font_size(LABEL_FONT_SIZE_RATIO_LARGE))
+        title1.set_path_effects(_text_stroke_effects())
         ax1.set_facecolor('#000005')
         ax1.set_yticklabels([]) # Hide radial labels
-        ax1.set_xticklabels(['0°', '45°', '90°', '135°', '180°', '225°', '270°', '315°'], color='gray', fontsize=8)
+        tick_labels1 = ax1.set_xticklabels(['0°', '45°', '90°', '135°', '180°', '225°', '270°', '315°'],
+                                           color='gray', fontsize=_label_font_size(LABEL_FONT_SIZE_RATIO_MED))
+        for tl in tick_labels1:
+            tl.set_path_effects(_text_stroke_effects())
         ax1.grid(True, color='gray', alpha=0.2)
         plt.tight_layout()
         north_image_path = IMAGES_DIR / f"{target_star_name}_north_hemisphere.png"
@@ -2004,7 +2044,8 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
             if sd['z'] < 0:  # Star is in southern hemisphere
                 plot_star_label(ax2, sd['star'], sd['azimuth_rad'], 
                                sd['elevation_rad'], is_north_hemisphere=False, 
-                               apparent_mag_from_target=sd['apparent_mag_from_target'])
+                               apparent_mag_from_target=sd['apparent_mag_from_target'],
+                               magnitude_limit=mag_limit)
         
         # Plot DSOs in or crossing southern hemisphere
         for dso_d in dso_data:
@@ -2021,10 +2062,15 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                                        is_north_hemisphere=False, 
                                        clip_to_equator=crosses_equator)
         
-        ax2.set_title(f"South Hemisphere\nFrom {target_star_name}", color='white', pad=20)
+        title2 = ax2.set_title(f"South Hemisphere\nFrom {target_star_name}", color='white', pad=20,
+                               fontsize=_label_font_size(LABEL_FONT_SIZE_RATIO_LARGE))
+        title2.set_path_effects(_text_stroke_effects())
         ax2.set_facecolor('#000005')
         ax2.set_yticklabels([]) # Hide radial labels
-        ax2.set_xticklabels(['0°', '45°', '90°', '135°', '180°', '225°', '270°', '315°'], color='gray', fontsize=8)
+        tick_labels2 = ax2.set_xticklabels(['0°', '45°', '90°', '135°', '180°', '225°', '270°', '315°'],
+                                           color='gray', fontsize=_label_font_size(LABEL_FONT_SIZE_RATIO_MED))
+        for tl in tick_labels2:
+            tl.set_path_effects(_text_stroke_effects())
         ax2.grid(True, color='gray', alpha=0.2)
         plt.tight_layout()
         south_image_path = IMAGES_DIR / f"{target_star_name}_south_hemisphere.png"
@@ -2102,10 +2148,15 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                                      is_north_hemisphere=True,
                                      clip_to_equator=False)
 
-        ax_ew.set_title(f"East / West Hemispheres\nFrom {target_star_name}", color='white', pad=20)
+        title_ew = ax_ew.set_title(f"East / West Hemispheres\nFrom {target_star_name}", color='white', pad=20,
+                                   fontsize=_label_font_size(LABEL_FONT_SIZE_RATIO_LARGE))
+        title_ew.set_path_effects(_text_stroke_effects())
         ax_ew.set_facecolor('#000005')
         ax_ew.set_yticklabels([])  # Hide radial labels
-        ax_ew.set_xticklabels(['0°', '45°', '90°', '135°', '180°', '225°', '270°', '315°'], color='gray', fontsize=8)
+        tick_labels_ew = ax_ew.set_xticklabels(['0°', '45°', '90°', '135°', '180°', '225°', '270°', '315°'],
+                                               color='gray', fontsize=_label_font_size(LABEL_FONT_SIZE_RATIO_MED))
+        for tl in tick_labels_ew:
+            tl.set_path_effects(_text_stroke_effects())
         ax_ew.grid(True, color='gray', alpha=0.2)
         plt.tight_layout()
         ew_image_path = IMAGES_DIR / f"{target_star_name}_east_west_hemispheres.png"
@@ -2125,6 +2176,7 @@ def main():
 Examples:
   {sys.argv[0]} HD118246                    # Generate maps with ~{DEFAULT_STAR_LIMIT:,} stars (default)
   {sys.argv[0]} HD118246 100000             # Generate maps with ~100,000 stars
+  {sys.argv[0]} Sol 50000 --magnitude-limit 13  # Include stars up to magnitude 13
   {sys.argv[0]} Sol 50000 --dump-positions  # Dump 3D positions for Sol (no images); verify calc
         """
     )
@@ -2150,13 +2202,21 @@ Examples:
         action='store_true',
         help='Write 3D positions to star_positions_3d table; skip image generation'
     )
+    parser.add_argument(
+        '--magnitude-limit',
+        type=float,
+        default=None,
+        metavar='MAG',
+        help=f'Faintest magnitude to render (default: {VISIBLE_MAG_LIMIT} from constants)'
+    )
     args = parser.parse_args()
     
     generate_galactic_hemispheres(
         args.target_star, 
         force_refresh=args.force_refresh,
         star_limit=args.stars,
-        dump_positions=args.dump_positions
+        dump_positions=args.dump_positions,
+        magnitude_limit=args.magnitude_limit
     )
 
 if __name__ == "__main__":
