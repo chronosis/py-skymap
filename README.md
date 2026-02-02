@@ -11,6 +11,7 @@ Generate galactic hemisphere maps centered on any target star using Gaia DR3 dat
 - **Dynamic Reference**: Automatically includes Sol (the Sun) as a reference point when viewing from other stars
 - **High-Quality Output**: Generates PNG images at 24"×24" @ 150 DPI by default, with proper star magnitudes and object labeling
 - **Proportional Labeling**: Text sizes scale with image dimensions; semi-transparent black stroke for legibility on varied backgrounds
+- **Stellar Color Mapping**: Star colors are derived from Gaia's BP-RP color index, reflecting each star's actual stellar class (effective temperature)—blue for hotter stars, red for cooler
 
 ## Requirements
 
@@ -139,7 +140,7 @@ The `images/` directory is created automatically if it doesn't exist. By default
 - [Polaris](images/Polaris_north_hemisphere.png)
 - [Proxima Centauri](images/Proxima%20Centauri_north_hemisphere.png)
 
-*These example images were generated using ~101M stars (about 10% of Gaia DR3) in the local cache (magnitude ≤16) and a visibility limit of 11.5.*
+*These example images were generated using ~101M stars (about 10% of Gaia DR3) in the local cache (magnitude ≤16) and a visibility limit of 11.5. The initial download of 101M stars from Gaia took approximately 10 hours; generating the skymaps from cached data takes about 5 minutes per target on a decently powered system.*
 
 ## Data Management
 

@@ -1796,8 +1796,21 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
         })
     
     # Calculate bright star coordinates and apparent magnitude from target's perspective
+    # Skip the target star itself — we're viewing from it, so it shouldn't appear as a labeled point
+    target_norm = target_star_name.strip().lower()
+    STAR_NAME_ALIASES = {"alpha centauri": "rigil kentaurus"}
+    
+    def _is_target_star(star):
+        star_name_norm = star["name"].lower()
+        if target_norm == star_name_norm:
+            return True
+        canonical = STAR_NAME_ALIASES.get(target_norm)
+        return canonical is not None and canonical == star_name_norm
+    
     star_data = []
     for star in bright_stars:
+        if _is_target_star(star):
+            continue
         az, el, z_star = calculate_star_coordinates(star, target_3d)
         
         # Calculate apparent magnitude from target star's perspective
