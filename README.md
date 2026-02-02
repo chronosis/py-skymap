@@ -109,11 +109,35 @@ poetry run python skymap-gen.py "Sol,Aldebaran,Proxima Centauri" 100000
 
 ### Output
 
-The script generates two PNG files in the `./images/` directory:
+The script generates three PNG files per target star in the `./images/` directory:
 - `images/<target_star>_north_hemisphere.png` - Northern galactic hemisphere
 - `images/<target_star>_south_hemisphere.png` - Southern galactic hemisphere
+- `images/<target_star>_east_west_hemispheres.png` - East and west hemispheres combined
 
 The `images/` directory is created automatically if it doesn't exist. By default, images are 24"×24" at 150 DPI (3600×3600 pixels), suitable for printing or detailed viewing.
+
+### Example Images
+
+**Sol (Sun) — Earth's perspective:**
+
+| North hemisphere | South hemisphere |
+|------------------|------------------|
+| [![Sol North](images/SOL_north_hemisphere.png)](images/SOL_north_hemisphere.png) | [![Sol South](images/SOL_south_hemisphere.png)](images/SOL_south_hemisphere.png) |
+
+**Aldebaran — from ~65 light-years away:**
+
+| North hemisphere | South hemisphere |
+|------------------|------------------|
+| [![Aldebaran North](images/Aldebaran_north_hemisphere.png)](images/Aldebaran_north_hemisphere.png) | [![Aldebaran South](images/Aldebaran_south_hemisphere.png)](images/Aldebaran_south_hemisphere.png) |
+
+**More examples** in the `images/` folder (each target includes north, south, and east/west hemisphere views):
+
+- [Alpha Centauri](images/Alpha%20Centauri_north_hemisphere.png)
+- [Betelgeuse](images/Betelgeuse_north_hemisphere.png)
+- [HD100000](images/HD100000_north_hemisphere.png)
+- [HD118246](images/HD118246_north_hemisphere.png)
+- [Polaris](images/Polaris_north_hemisphere.png)
+- [Proxima Centauri](images/Proxima%20Centauri_north_hemisphere.png)
 
 ## Data Management
 
