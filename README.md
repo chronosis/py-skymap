@@ -12,6 +12,8 @@ Generate galactic hemisphere maps centered on any target star using Gaia DR3 dat
 - **High-Quality Output**: Generates PNG images at 24"×24" @ 150 DPI by default, with proper star magnitudes and object labeling
 - **Proportional Labeling**: Text sizes scale with image dimensions; semi-transparent black stroke for legibility on varied backgrounds
 - **Stellar Color Mapping**: Star colors are derived from Gaia's BP-RP color index, reflecting each star's actual stellar class (effective temperature)—blue for hotter stars, red for cooler
+- **Depth-Ordered Rendering**: Stars are drawn back to front (farthest first, nearest last) so nearer stars correctly occlude more distant ones
+- **Magnitude-Based Sizing**: Point sizes reflect each star's apparent magnitude from the target star's perspective—brighter stars appear larger
 
 ## Requirements
 
