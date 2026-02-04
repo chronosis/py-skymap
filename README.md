@@ -110,6 +110,16 @@ poetry run python skymap-gen.py "Sol,Aldebaran,Proxima Centauri" 100000
   poetry run python skymap-gen.py Sol 50000 --magnitude-limit 13
   ```
 
+- `--point-size-min`: Smallest star point size in the plot (default: 3)
+  ```bash
+  poetry run python skymap-gen.py Sol 50000 --point-size-min 2
+  ```
+
+- `--point-size-max`: Largest star point size in the plot (default: 132)
+  ```bash
+  poetry run python skymap-gen.py Sol 50000 --point-size-max 200
+  ```
+
 ### Output
 
 The script generates three PNG files per target star in the `./images/` directory:
@@ -135,12 +145,12 @@ The `images/` directory is created automatically if it doesn't exist. By default
 
 **More examples** in the `images/` folder (each target includes north, south, and east/west hemisphere views):
 
-- [Alpha Centauri](images/Alpha%20Centauri_north_hemisphere.png)
-- [Betelgeuse](images/Betelgeuse_north_hemisphere.png)
-- [HD100000](images/HD100000_north_hemisphere.png)
-- [HD118246](images/HD118246_north_hemisphere.png)
-- [Polaris](images/Polaris_north_hemisphere.png)
-- [Proxima Centauri](images/Proxima%20Centauri_north_hemisphere.png)
+- **[Alpha Centauri](images/Alpha%20Centauri_north_hemisphere.png)** — Relatively nearby star to Sol (part of the closest stellar system to the Sun).
+- **[Betelgeuse](images/Betelgeuse_north_hemisphere.png)** — Red supergiant over 100 ly from Earth (in Orion).
+- **[HD100000](images/HD100000_north_hemisphere.png)** (BD-22 3152) — Giant star ~1000 ly from Earth, closer to the galactic center.
+- **[HD118246](images/HD118246_north_hemisphere.png)** — Star high above the main galactic plane.
+- **[Polaris](images/Polaris_north_hemisphere.png)** — The North Star; appears almost directly above Earth's north pole.
+- **[Proxima Centauri](images/Proxima%20Centauri_north_hemisphere.png)** — Relatively nearby star to Sol (closest known star to the Sun).
 
 *These example images were generated using ~101M stars (about 10% of Gaia DR3) in the local cache (magnitude ≤16) and a visibility limit of 11.5. The initial download of 101M stars from Gaia took approximately 10 hours; generating the skymaps from cached data takes about 5 minutes per target on a decently powered system.*
 

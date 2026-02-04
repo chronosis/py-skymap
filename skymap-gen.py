@@ -1349,7 +1349,7 @@ def calculate_point_size_by_magnitude(magnitude, min_size=1, max_size=10, magnit
         magnitude_brightest=magnitude_brightest,
     )
 
-def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, apparent_mag_from_target, magnitude_limit=None):
+def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, apparent_mag_from_target, magnitude_limit=None, point_size_min=None, point_size_max=None):
     """Plot a bright star with label on a polar plot hemisphere.
     
     Args:
@@ -1360,8 +1360,12 @@ def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, a
         is_north_hemisphere: True for north, False for south
         apparent_mag_from_target: Apparent magnitude from target star's perspective
         magnitude_limit: faintest magnitude for sizing (uses VISIBLE_MAG_LIMIT if None)
+        point_size_min: smallest point size (uses STAR_POINT_MIN_SIZE if None)
+        point_size_max: largest point size (uses STAR_POINT_MAX_SIZE if None)
     """
     mag_limit = magnitude_limit if magnitude_limit is not None else VISIBLE_MAG_LIMIT
+    min_pt = point_size_min if point_size_min is not None else STAR_POINT_MIN_SIZE
+    max_pt = point_size_max if point_size_max is not None else STAR_POINT_MAX_SIZE
     # Calculate radial position on polar plot
     if is_north_hemisphere:
         radial = 0.5 * np.pi - elevation_rad  # Pole at center
@@ -1374,8 +1378,8 @@ def plot_star_label(ax, star, azimuth_rad, elevation_rad, is_north_hemisphere, a
         # Use same size range as background stars for consistency
         point_size = calculate_point_size_by_magnitude(
             apparent_mag_from_target,
-            min_size=STAR_POINT_MIN_SIZE,
-            max_size=STAR_POINT_MAX_SIZE,
+            min_size=min_pt,
+            max_size=max_pt,
             magnitude_brightest=mag_limit
         )
         
@@ -1540,8 +1544,10 @@ def plot_dso_on_hemisphere(ax, dso, azimuth_rad, elevation_rad, is_north_hemisph
                              transform=ax.transData)
             ann.set_path_effects(_text_stroke_effects())
 
-def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_refresh=False, star_limit=None, dump_positions=False, magnitude_limit=None):
+def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_refresh=False, star_limit=None, dump_positions=False, magnitude_limit=None, point_size_min=None, point_size_max=None):
     mag_limit = magnitude_limit if magnitude_limit is not None else VISIBLE_MAG_LIMIT
+    point_min = point_size_min if point_size_min is not None else STAR_POINT_MIN_SIZE
+    point_max = point_size_max if point_size_max is not None else STAR_POINT_MAX_SIZE
     print(f"--- Processing {target_star_name} ---")
     if dump_positions:
         print("Mode: dump positions to DB (no images)")
@@ -1755,15 +1761,15 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     # This guarantees that *no* star that passes the magnitude filter will ever have
     # a zero point size, independent of VISIBLE_MAG_LIMIT.
     mag = np.asarray(m_plot, dtype=float)
-    point_sizes = np.full_like(mag, STAR_POINT_MIN_SIZE, dtype=float)
+    point_sizes = np.full_like(mag, point_min, dtype=float)
 
     mag_threshold = 7.0
     bright_mask = mag <= mag_threshold
     if np.any(bright_mask):
         bright_mag = np.clip(mag[bright_mask], 0.0, mag_threshold)
         bright_mag_norm = bright_mag / mag_threshold  # 0 .. 1
-        size_range = STAR_POINT_MAX_SIZE - STAR_POINT_MIN_SIZE
-        point_sizes[bright_mask] = STAR_POINT_MAX_SIZE - bright_mag_norm * size_range
+        size_range = point_max - point_min
+        point_sizes[bright_mask] = point_max - bright_mag_norm * size_range
 
     # Get bright galaxies, stars, and deep sky objects
     galaxies = get_bright_galaxies()
@@ -1947,7 +1953,8 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                 plot_star_label(ax1, sd['star'], sd['azimuth_rad'], 
                                sd['elevation_rad'], is_north_hemisphere=True, 
                                apparent_mag_from_target=sd['apparent_mag_from_target'],
-                               magnitude_limit=mag_limit)
+                               magnitude_limit=mag_limit,
+                               point_size_min=point_min, point_size_max=point_max)
         
         # Plot DSOs in or crossing northern hemisphere
         for dso_d in dso_data:
@@ -2058,7 +2065,8 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                 plot_star_label(ax2, sd['star'], sd['azimuth_rad'], 
                                sd['elevation_rad'], is_north_hemisphere=False, 
                                apparent_mag_from_target=sd['apparent_mag_from_target'],
-                               magnitude_limit=mag_limit)
+                               magnitude_limit=mag_limit,
+                               point_size_min=point_min, point_size_max=point_max)
         
         # Plot DSOs in or crossing southern hemisphere
         for dso_d in dso_data:
@@ -2223,6 +2231,20 @@ Examples:
         metavar='MAG',
         help=f'Faintest magnitude to render (default: {VISIBLE_MAG_LIMIT} from constants)'
     )
+    parser.add_argument(
+        '--point-size-min',
+        type=float,
+        default=None,
+        metavar='SIZE',
+        help=f'Smallest star point size in plot (default: {STAR_POINT_MIN_SIZE})'
+    )
+    parser.add_argument(
+        '--point-size-max',
+        type=float,
+        default=None,
+        metavar='SIZE',
+        help=f'Largest star point size in plot (default: {STAR_POINT_MAX_SIZE})'
+    )
     args = parser.parse_args()
     
     # Parse comma-separated target stars; strip whitespace and surrounding quotes
@@ -2241,7 +2263,9 @@ Examples:
             force_refresh=args.force_refresh,
             star_limit=args.stars,
             dump_positions=args.dump_positions,
-            magnitude_limit=args.magnitude_limit
+            magnitude_limit=args.magnitude_limit,
+            point_size_min=args.point_size_min,
+            point_size_max=args.point_size_max
         )
 
 if __name__ == "__main__":
