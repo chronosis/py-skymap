@@ -5,6 +5,28 @@ These were originally defined in `skymap-gen.py` and are extracted here to
 keep the main script focused on orchestration and plotting.
 """
 
+# Known parallax overrides for target-star resolution (catalog cross-checked).
+# Distance (pc) = 1000 / parallax (mas) by definition of parsec.
+# Use these when the resolved source (cache/Gaia) may be wrong or has a poor value.
+# Sources: Gaia DR3, Simbad, literature. Parallax in milliarcseconds (mas).
+KNOWN_TARGET_PARALLAX_OVERRIDES: dict[str, dict] = {
+    # Proxima Centauri: ~4.24 ly = 1.30 pc → parallax ~768 mas. Gaia DR3 768.0665 ± 0.0499 mas.
+    "proxima centauri": {"parallax_mas": 768.0665},
+    # Alpha Centauri (A/B barycenter often resolved): ~1.34 pc, parallax ~746 mas.
+    "alpha centauri": {"parallax_mas": 746.0},
+}
+
+
+def get_known_target_parallax_override(target_star_name: str) -> dict | None:
+    """Return a catalog-based parallax override for this target, if any.
+
+    Used to force correct distance when the star is well-known and the resolved
+    source (Gaia/cache) might be wrong or marginal. Returns dict with at least
+    parallax_mas; optionally ra_deg, dec_deg to override position too.
+    """
+    key = target_star_name.strip().lower()
+    return KNOWN_TARGET_PARALLAX_OVERRIDES.get(key)
+
 
 def get_bright_galaxies():
     """Return data for the brightest distant background galaxies visible to naked eye.

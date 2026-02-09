@@ -122,10 +122,10 @@ poetry run python skymap-gen.py "Sol,Aldebaran,Proxima Centauri" 100000
 
 ### Output
 
-The script generates three PNG files per target star in the `./images/` directory:
+The script generates three PNG files per target star in the `./images/` directory (spaces in the target name become dashes in filenames):
 - `images/<target_star>_north_hemisphere.png` - Northern galactic hemisphere
 - `images/<target_star>_south_hemisphere.png` - Southern galactic hemisphere
-- `images/<target_star>_east_west_hemispheres.png` - East and west hemispheres combined
+- `images/<target_star>_360_degree.png` - Full 360° view (east and west hemispheres combined)
 
 The `images/` directory is created automatically if it doesn't exist. By default, images are 24"×24" at 150 DPI (3600×3600 pixels), suitable for printing or detailed viewing.
 
@@ -143,14 +143,14 @@ The `images/` directory is created automatically if it doesn't exist. By default
 |------------------|------------------|
 | [![Aldebaran North](images/Aldebaran_north_hemisphere.png)](images/Aldebaran_north_hemisphere.png) | [![Aldebaran South](images/Aldebaran_south_hemisphere.png)](images/Aldebaran_south_hemisphere.png) |
 
-**More examples** in the `images/` folder (each target includes north, south, and east/west hemisphere views):
+**More examples** in the `images/` folder (each target includes north, south, and 360° views):
 
-- **[Alpha Centauri](images/Alpha%20Centauri_north_hemisphere.png)** — Relatively nearby star to Sol (part of the closest stellar system to the Sun).
+- **[Alpha Centauri](images/Alpha-Centauri_north_hemisphere.png)** — Relatively nearby star to Sol (part of the closest stellar system to the Sun).
 - **[Betelgeuse](images/Betelgeuse_north_hemisphere.png)** — Red supergiant over 100 ly from Earth (in Orion).
 - **[HD100000](images/HD100000_north_hemisphere.png)** (BD-22 3152) — Giant star ~1000 ly from Earth, closer to the galactic center.
 - **[HD118246](images/HD118246_north_hemisphere.png)** — Star high above the main galactic plane.
 - **[Polaris](images/Polaris_north_hemisphere.png)** — The North Star; appears almost directly above Earth's north pole.
-- **[Proxima Centauri](images/Proxima%20Centauri_north_hemisphere.png)** — Relatively nearby star to Sol (closest known star to the Sun).
+- **[Proxima Centauri](images/Proxima-Centauri_north_hemisphere.png)** — Relatively nearby star to Sol (closest known star to the Sun).
 
 *These example images were generated using ~101M stars (about 10% of Gaia DR3) in the local cache (magnitude ≤16) and a visibility limit of 11.5. The initial download of 101M stars from Gaia took approximately 10 hours; generating the skymaps from cached data takes about 5 minutes per target on a decently powered system.*
 
@@ -179,17 +179,60 @@ poetry run python download-gaia-csv.py [stars]
 
 This downloads CSV.gz files directly from the ESA CDN, bypassing the Gaia API.
 
+### Bulk Download from VizieR
+
+You can bulk-download star data from [VizieR](https://vizier.cds.unistra.fr/) into the same SQLite cache. Supported for **Gaia DR3** (catalog `I/355/gaiadr3`): rows are merged into `gaia_source` so `skymap-gen` can use them like the Gaia Archive or CSV pipeline.
+
+```bash
+# Default: Gaia DR3, 50,000 rows
+poetry run python download-vizier.py
+
+# Gaia DR3 with a custom row limit
+poetry run python download-vizier.py I/355/gaiadr3 100000
+poetry run python download-vizier.py I/355/gaiadr3 --limit 50000
+
+# Full catalog (very large for Gaia DR3)
+poetry run python download-vizier.py I/355/gaiadr3 --all
+```
+
+Use `--no-merge` to fetch without writing to the cache (e.g. for testing). Other VizieR catalogues are not yet mapped into `gaia_source`; only Gaia DR3 is supported for merging.
+
+### Simbad Cache (filling gaps)
+
+Simbad data can be queried and cached in the same SQLite database (`gaia_cache.db`) to flesh out gaps—e.g. objects not in Gaia, or updated positions/magnitudes/parallax for named objects. The cache table `simbad_cache` stores `main_id`, `ra`, `dec`, `parallax_mas`, `vmag`, `otype`, and `cached_at`.
+
+- **Populate the cache** using the bright-star list (or your own list):
+  ```bash
+  poetry run python fetch-simbad-cache.py
+  poetry run python fetch-simbad-cache.py "M1,M2,NGC 1976"
+  poetry run python fetch-simbad-cache.py --names "Sirius,Aldebaran,Vega"
+  ```
+- **API**: Use `lib.simbad_client.query_simbad_and_cache(cache_db, identifiers)` to fetch and cache in bulk, or `get_from_simbad_or_cache(cache_db, identifier)` for a single lookup (cache-first). Read back with `lib.sqlite_helper.get_simbad_from_cache(db_path, identifier)` or `get_all_simbad_cached(db_path)`.
+
+Simbad is rate-limited (recommended 5–10 queries/sec); the client batches requests and adds a short delay between them.
+
+**Bulk Simbad via TAP:** Simbad does not provide a full catalog dump like Gaia’s CDN; it’s a dynamic database. For bulk data you can use **TAP (Table Access Protocol)** with ADQL:
+
+- **astroquery**: `Simbad.query_tap("SELECT TOP 50000 main_id, ra, dec FROM basic WHERE ...", async_job=True, timeout=300, maxrec=2000000)` for large queries. Use `async_job=True` and a `timeout` to avoid timeouts.
+- **Cone search**: restrict by sky region with `CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', ra_center, dec_center, radius_deg)) = 1`.
+- **Criteria**: filter by `otype`, or join with the `flux` table for magnitude limits. See [SIMBAD ADQL examples](https://cds.unistra.fr/help/documentation/simbad-more/adql-simbad) and the [ADQL cheat sheet](https://simbad.u-strasbg.fr/simbad/tap/help/adqlHelp.html).
+
+You can run such a TAP query, then insert the result rows into `simbad_cache` (with the same columns: main_id, ra, dec, parallax_mas, vmag, otype) to bulk-fill the cache. For complete published catalogues, CDS recommends [VizieR](https://vizier.cds.unistra.fr/) rather than Simbad.
+
 ## Project Structure
 
 ```
 py-skymap/
 ├── skymap-gen.py          # Main script for generating sky maps
+├── fetch-simbad-cache.py  # Populate Simbad cache (optional, for filling gaps)
 ├── download-gaia-csv.py   # Script for downloading CSV files from ESA CDN
+├── download-vizier.py     # Bulk download from VizieR (e.g. Gaia DR3 → gaia_source)
 ├── gaia-query.py          # Utility script for Gaia queries
 ├── pyproject.toml         # Poetry dependencies configuration
 ├── .gitattributes         # Git LFS configuration for PNG files
 ├── gaia_cache/            # SQLite database cache (git-ignored)
-│   └── gaia_cache.db      # Cached star data
+│   └── gaia_cache.db      # Cached Gaia + Simbad + VizieR data
+├── lib/                   # Shared library (gaia_client, simbad_client, vizier_client, etc.)
 └── images/                # Generated sky map images (tracked with Git LFS)
     └── *.png
 ```
@@ -201,7 +244,7 @@ Managed via Poetry (see `pyproject.toml`):
 - **numpy**: Numerical computations
 - **matplotlib**: Plotting and visualization
 - **astropy**: Astronomical coordinate transformations and calculations
-- **astroquery**: Querying Gaia Archive
+- **astroquery**: Querying Gaia Archive and Simbad
 - **tqdm**: Progress bars
 - **requests**: HTTP requests
 - **beautifulsoup4**: HTML parsing

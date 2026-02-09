@@ -62,6 +62,7 @@ from lib.star_data import (
     get_bright_stars as _stardata_get_bright_stars,
     get_bright_deep_sky_objects as _stardata_get_bright_deep_sky_objects,
     get_magellanic_clouds as _stardata_get_magellanic_clouds,
+    get_known_target_parallax_override as _stardata_get_known_target_parallax_override,
 )
 
 
@@ -243,13 +244,16 @@ def ensure_cache_populated(force_refresh=False, star_limit=None):
                 print("Using existing cache (no limit specified).")
                 return existing_count
             else:
-                # Need more stars, continue downloading
+                # Need more stars, continue downloading from Gaia then VizieR
                 print(f"Continuing download to reach {star_limit:,} stars...")
-                # Continue to download more data
-                return _download_from_gaia(star_limit, existing_count)
+                _download_from_gaia(star_limit, existing_count)
+                _download_from_vizier(star_limit)
+                return get_star_count(CACHE_DB)
     
-    # Cache is empty or force_refresh, download from Gaia
-    return _download_from_gaia(star_limit, 0)
+    # Cache is empty or force_refresh, download from Gaia then VizieR
+    _download_from_gaia(star_limit, 0)
+    _download_from_vizier(star_limit)
+    return get_star_count(CACHE_DB)
 
 def _update_progress_bar(pbar, chunk_num, chunk_inserted, duplicates, stars_inserted, star_limit):
     """Helper function to update progress bar, abstracting HAS_TQDM checks.
@@ -297,6 +301,31 @@ def _download_from_gaia(star_limit=None, existing_count=0):
         existing_count=existing_count,
     )
 
+
+def _download_from_vizier(star_limit=None):
+    """Download a roughly equivalent amount of Gaia DR3 data from VizieR and merge into cache.
+
+    Uses the same star_limit as the Gaia request (or DEFAULT_STAR_LIMIT if None)
+    so the cache is filled from both sources. Rows are merged with INSERT OR IGNORE.
+    Returns number of new rows inserted from VizieR.
+    """
+    from lib.vizier_client import GAIA_VIZIER_CATALOG, download_vizier_catalog
+
+    vizier_limit = star_limit if star_limit is not None else DEFAULT_STAR_LIMIT
+    print(f"\nDownloading ~{vizier_limit:,} stars from VizieR ({GAIA_VIZIER_CATALOG})...")
+    try:
+        n = download_vizier_catalog(
+            GAIA_VIZIER_CATALOG,
+            CACHE_DB,
+            row_limit=vizier_limit,
+            merge_into_gaia=True,
+        )
+        print(f"  VizieR: inserted {n:,} new rows into cache.")
+        return n
+    except Exception as e:
+        print(f"  VizieR download failed (continuing with Gaia cache only): {e}", file=sys.stderr)
+        return 0
+
 def process_star_chunk(chunk_data, target_3d, dump_positions=False, magnitude_limit=None):
     """Process a chunk of stars and return valid stars for plotting or dumping.
     
@@ -324,14 +353,13 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False, magnitude_li
     )
     
     # Handle parallax: use actual distance if valid, otherwise use large assumed distance for background stars
+    # Distance (pc) = 1000 / parallax (mas) by definition of parsec; Gaia gives parallax in mas.
     # Background stars (parallax <= 0 or invalid) are very far away - use ASSUMED_BACKGROUND_DISTANCE_PC
-    # This ensures only truly distant objects (beyond the Milky Way) are treated as fixed background
-    # Calculate distances (only for stars that pass initial mask)
     valid_parallax_mask = (parallax_values > 0) & np.isfinite(parallax_values)
     d_earth_pc = np.where(
         valid_parallax_mask,
-        1000.0 / parallax_values,  # Actual distance from parallax
-        ASSUMED_BACKGROUND_DISTANCE_PC  # Assumed distance for background stars
+        1000.0 / parallax_values,  # d (pc) = 1000 / parallax (mas)
+        ASSUMED_BACKGROUND_DISTANCE_PC
     )
     
     # Add distance validation to master mask
@@ -1253,26 +1281,40 @@ def calculate_sol_coordinates(target_3d):
 
 def calculate_sagittarius_a_coordinates(target_3d):
     """Calculate azimuth and elevation of Sagittarius A* (galactic center) from target star's perspective.
-    
-    Sagittarius A* is at the galactic center:
-    - RA: 266.4168° (17h 45m 40s)
-    - Dec: -29.0078° (-29° 00' 28")
-    - Distance: ~8,000 pc (~26,000 light-years) from Earth
-    
-    Returns: (azimuth_rad, elevation_rad, z)
+
+    The direction to Sgr A* depends on the target: we form the vector from the target's
+    3D position to Sgr A*'s 3D position (both in ICRS), then convert to azimuth/elevation
+    in the same convention used for the star field (ICRS north = positive z).
+    Sagittarius A* fixed position (from Earth):
+    - RA: 266.4168°, Dec: -29.0078°, Distance: ~8,000 pc (~26,000 ly)
+
+    Returns: (azimuth_rad, elevation_rad, z) as plain floats; position is target-relative.
     """
-    # Sagittarius A* coordinates
+    # Sgr A* position in ICRS (Cartesian, origin at Solar System barycenter)
     sgr_a_ra_deg = 266.4168
     sgr_a_dec_deg = -29.0078
     sgr_a_distance_pc = 8000.0  # ~8 kpc from Earth
-    
-    return transform_to_target_frame(
-        target_3d,
-        sgr_a_ra_deg,
-        sgr_a_dec_deg,
-        sgr_a_distance_pc,
-        use_earth_centric_approx=False
+    sgr_a_icrs = SkyCoord(
+        ra=sgr_a_ra_deg * u.deg,
+        dec=sgr_a_dec_deg * u.deg,
+        distance=sgr_a_distance_pc * u.pc,
+        frame="icrs",
     )
+    sgr_a_cart = np.asarray(sgr_a_icrs.cartesian.xyz.value)   # (3,) in pc
+    target_cart = np.asarray(target_3d.cartesian.xyz.value)  # (3,) in pc
+
+    # Vector from target to Sgr A* (direction in which to look from target)
+    vector_from_target = sgr_a_cart - target_cart
+    distance = np.linalg.norm(vector_from_target)
+    if distance < 1e-10:
+        return 0.0, 0.0, 0.0  # Target is at Sgr A*
+    unit_vector = vector_from_target / distance
+    x, y, z = float(unit_vector[0]), float(unit_vector[1]), float(unit_vector[2])
+
+    azimuth_rad = float(np.arctan2(y, x))
+    azimuth_rad = float(np.mod(azimuth_rad, 2 * np.pi))
+    elevation_rad = float(np.arcsin(np.clip(z, -1.0, 1.0)))
+    return azimuth_rad, elevation_rad, z
 
 def plot_sagittarius_a_reference(ax, azimuth_rad, elevation_rad, is_north_hemisphere):
     """Plot Sagittarius A* as a special reference point on a polar plot hemisphere.
@@ -1571,8 +1613,9 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
             target_data = get_target_star_from_gaia(target_star_name)
             
             if target_data is None:
-                raise RuntimeError(f"Could not find target star '{target_star_name}' in Gaia database.")
-            
+                print(f"Error: Could not find target star '{target_star_name}' (cache and Gaia/Simbad lookup failed).", file=sys.stderr)
+                print(f"  Check the name (e.g. 'Arcturus' not 'Arcturis') and try again. Skipping this target.", file=sys.stderr)
+                return False
             print(f"Caching target star in database...")
             cache_target_star(CACHE_DB, target_data)
             print(f"  Target star cached successfully.")
@@ -1584,13 +1627,21 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
             print(f"    Magnitude: {target_data['phot_g_mean_mag']:.2f}")
         
         # 2. Calculate target star's 3D position relative to Earth
+        # Distance formula: d (pc) = 1000 / parallax (mas) — standard parsec definition.
+        override = _stardata_get_known_target_parallax_override(target_star_name)
+        if override and "parallax_mas" in override:
+            target_data["parallax"] = override["parallax_mas"]
+            if "ra_deg" in override:
+                target_data["ra"] = override["ra_deg"]
+            if "dec_deg" in override:
+                target_data["dec"] = override["dec_deg"]
+            print(f"  Using catalog parallax override for '{target_star_name}': {target_data['parallax']:.4f} mas")
         target_ra = target_data['ra']
         target_dec = target_data['dec']
         target_parallax = target_data['parallax']
-        
         if target_parallax > 0 and np.isfinite(target_parallax):
             target_dist_pc = 1000.0 / target_parallax
-            print(f"  Calculated distance from parallax: {target_dist_pc:.2f} pc")
+            print(f"  Calculated distance from parallax: {target_dist_pc:.2f} pc (~{target_dist_pc * 3.262:.2f} ly)")
         else:
             target_dist_pc = 20.0
             print(f"  Warning: Invalid parallax ({target_parallax}), using default distance: {target_dist_pc} pc")
@@ -1745,6 +1796,8 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
         return
     
     # 5. Plotting Northern and Southern Hemispheres based on z-component
+    # Output filenames use target name with spaces replaced by dashes
+    filename_base = target_star_name.replace(" ", "-")
     # Scaling for stars
     #
     # IMPORTANT:
@@ -1982,7 +2035,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
             tl.set_path_effects(_text_stroke_effects())
         ax1.grid(True, color='gray', alpha=0.2)
         plt.tight_layout()
-        north_image_path = IMAGES_DIR / f"{target_star_name}_north_hemisphere.png"
+        north_image_path = IMAGES_DIR / f"{filename_base}_north_hemisphere.png"
         plt.savefig(north_image_path, facecolor='#000005', bbox_inches='tight', dpi=150)
         plt.close(fig_north)
         print(f"Saved: {north_image_path} ({np.sum(north_mask):,} stars)")
@@ -2094,7 +2147,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
             tl.set_path_effects(_text_stroke_effects())
         ax2.grid(True, color='gray', alpha=0.2)
         plt.tight_layout()
-        south_image_path = IMAGES_DIR / f"{target_star_name}_south_hemisphere.png"
+        south_image_path = IMAGES_DIR / f"{filename_base}_south_hemisphere.png"
         plt.savefig(south_image_path, facecolor='#000005', bbox_inches='tight', dpi=150)
         plt.close(fig_south)
         print(f"Saved: {south_image_path} ({np.sum(south_mask):,} stars)")
@@ -2180,12 +2233,13 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
             tl.set_path_effects(_text_stroke_effects())
         ax_ew.grid(True, color='gray', alpha=0.2)
         plt.tight_layout()
-        ew_image_path = IMAGES_DIR / f"{target_star_name}_east_west_hemispheres.png"
+        ew_image_path = IMAGES_DIR / f"{filename_base}_360_degree.png"
         plt.savefig(ew_image_path, facecolor='#000005', bbox_inches='tight', dpi=150)
         plt.close(fig_east_west)
         print(f"Saved: {ew_image_path} ({np.sum(east_mask | west_mask):,} stars)")
     else:
         print("Warning: No stars in east or west hemisphere (0°–360° azimuth)")
+    return True
 
 def main():
     """Main entry point for the script."""
@@ -2257,8 +2311,9 @@ Examples:
     if not target_stars:
         parser.error("At least one target star name is required")
     
+    failed = []
     for target_star_name in target_stars:
-        generate_galactic_hemispheres(
+        ok = generate_galactic_hemispheres(
             target_star_name,
             force_refresh=args.force_refresh,
             star_limit=args.stars,
@@ -2267,6 +2322,12 @@ Examples:
             point_size_min=args.point_size_min,
             point_size_max=args.point_size_max
         )
+        if ok is False:
+            failed.append(target_star_name)
+    if failed:
+        print(f"\nSkipped {len(failed)} target(s) due to lookup failure: {', '.join(failed)}", file=sys.stderr)
+        sys.exit(1)
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

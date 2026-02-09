@@ -1,4 +1,5 @@
 import sqlite3
+import datetime
 from pathlib import Path
 
 import numpy as np
@@ -58,6 +59,32 @@ def init_database(db_path: Path):
         """
         CREATE INDEX IF NOT EXISTS idx_star_positions_target
         ON star_positions_3d(target_star_name)
+        """
+    )
+
+    # Simbad cache: object lookups by identifier (main_id). Used to flesh out gaps
+    # with Simbad-sourced positions/magnitudes/parallax (e.g. objects not in Gaia).
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS simbad_cache (
+            main_id TEXT PRIMARY KEY,
+            ra REAL NOT NULL,
+            dec REAL NOT NULL,
+            parallax_mas REAL,
+            vmag REAL,
+            otype TEXT,
+            cached_at TEXT NOT NULL
+        )
+        """
+    )
+    # Map requested names (e.g. "Sirius") to main_id (e.g. "* alf CMa") for cache lookup.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS simbad_cache_aliases (
+            alias TEXT PRIMARY KEY,
+            main_id TEXT NOT NULL,
+            FOREIGN KEY (main_id) REFERENCES simbad_cache(main_id)
+        )
         """
     )
 
@@ -261,6 +288,134 @@ def load_stars_from_cache(db_path: Path, limit=None, offset: int = 0):
             "bp_rp": bp_rp_values,
         }
     )
+
+
+def get_simbad_from_cache(db_path: Path, identifier: str):
+    """Return a cached Simbad object by identifier (main_id or alias; case-insensitive).
+
+    Returns a dict with keys: main_id, ra, dec, parallax_mas, vmag, otype, cached_at,
+    or None if not in cache.
+    """
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    key = identifier.strip()
+    # Resolve alias to main_id if present
+    cursor.execute(
+        "SELECT main_id FROM simbad_cache_aliases WHERE LOWER(TRIM(alias)) = LOWER(?) LIMIT 1",
+        (key,),
+    )
+    alias_row = cursor.fetchone()
+    if alias_row:
+        key = alias_row[0]
+    cursor.execute(
+        """
+        SELECT main_id, ra, dec, parallax_mas, vmag, otype, cached_at
+        FROM simbad_cache
+        WHERE LOWER(TRIM(main_id)) = LOWER(?)
+        LIMIT 1
+        """,
+        (key,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return {
+        "main_id": row[0],
+        "ra": row[1],
+        "dec": row[2],
+        "parallax_mas": row[3],
+        "vmag": row[4],
+        "otype": row[5],
+        "cached_at": row[6],
+    }
+
+
+def put_simbad_in_cache(
+    db_path: Path,
+    rows: list[dict],
+    *,
+    requested_identifiers: list[str] | None = None,
+) -> int:
+    """Insert or replace Simbad objects in the cache.
+
+    Each dict must have: main_id, ra, dec; optional: parallax_mas, vmag, otype.
+    cached_at is set automatically.
+    If requested_identifiers is provided, it must match the order of rows (one per row);
+    each requested name is stored as an alias for the row's main_id so lookups by that
+    name hit the cache. Returns number of rows inserted/replaced.
+    """
+    if not rows:
+        return 0
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    data = [
+        (
+            r["main_id"],
+            float(r["ra"]),
+            float(r["dec"]),
+            r.get("parallax_mas"),
+            r.get("vmag"),
+            r.get("otype"),
+            now,
+        )
+        for r in rows
+    ]
+    cursor.executemany(
+        """
+        INSERT OR REPLACE INTO simbad_cache
+        (main_id, ra, dec, parallax_mas, vmag, otype, cached_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        data,
+    )
+    n = cursor.rowcount
+    if requested_identifiers and len(requested_identifiers) >= len(rows):
+        for i, r in enumerate(rows):
+            alias = requested_identifiers[i].strip()
+            if alias and alias.lower() != r["main_id"].lower():
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO simbad_cache_aliases (alias, main_id)
+                    VALUES (?, ?)
+                    """,
+                    (alias, r["main_id"]),
+                )
+    conn.commit()
+    conn.close()
+    return n
+
+
+def get_all_simbad_cached(db_path: Path):
+    """Return all cached Simbad objects as a list of dicts (same keys as get_simbad_from_cache)."""
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT main_id, ra, dec, parallax_mas, vmag, otype, cached_at
+        FROM simbad_cache
+        ORDER BY main_id
+        """
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "main_id": r[0],
+            "ra": r[1],
+            "dec": r[2],
+            "parallax_mas": r[3],
+            "vmag": r[4],
+            "otype": r[5],
+            "cached_at": r[6],
+        }
+        for r in rows
+    ]
 
 
 def check_sky_coverage_bias(db_path: Path):
