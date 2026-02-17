@@ -161,6 +161,30 @@ def _download_from_gaia(cache_db: Path, chunk_size: int, star_limit=None, existi
                         print(f"  Error during Gaia query: {e}")
                         break
             if last_error is not None:
+                # On timeout (408), fall back to VizieR for this chunk instead of failing
+                is_408 = "408" in str(last_error) or (
+                    getattr(last_error, "response", None)
+                    and getattr(getattr(last_error, "response", None), "status_code", None) == 408
+                )
+                if is_408:
+                    try:
+                        from .vizier_client import GAIA_VIZIER_CATALOG, download_vizier_catalog
+                        n = download_vizier_catalog(
+                            GAIA_VIZIER_CATALOG,
+                            cache_db,
+                            row_limit=chunk_size,
+                            merge_into_gaia=True,
+                        )
+                        if n > 0:
+                            stars_inserted += n
+                            print(f"  Gaia timeout: filled chunk from VizieR ({n:,} rows).")
+                        offset += chunk_size
+                        chunk_num += 1
+                        if star_limit is not None and stars_inserted >= star_limit:
+                            break
+                        continue
+                    except Exception as vizier_err:
+                        print(f"  VizieR fallback failed: {vizier_err}")
                 break
 
             if len(results) == 0:
@@ -175,8 +199,8 @@ def _download_from_gaia(cache_db: Path, chunk_size: int, star_limit=None, existi
             cursor.executemany(
                 """
                 INSERT OR IGNORE INTO gaia_source
-                (source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp, source)
+                VALUES (?, ?, ?, ?, ?, ?, 'gaia')
                 """,
                 data_to_insert,
             )

@@ -208,6 +208,7 @@ Simbad data can be queried and cached in the same SQLite database (`gaia_cache.d
   poetry run python fetch-simbad-cache.py --names "Sirius,Aldebaran,Vega"
   ```
 - **API**: Use `lib.simbad_client.query_simbad_and_cache(cache_db, identifiers)` to fetch and cache in bulk, or `get_from_simbad_or_cache(cache_db, identifier)` for a single lookup (cache-first). Read back with `lib.sqlite_helper.get_simbad_from_cache(db_path, identifier)` or `get_all_simbad_cached(db_path)`.
+- **Bulk by count (no pre-defined list):** Use `query_simbad_bulk_tap(cache_db, row_limit, ...)` to request an arbitrary number of stars from Simbad via TAP (one ADQL query). Use `ingest_simbad_bulk_into_gaia_source(cache_db, row_limit, ...)` to fetch that many stars and insert them into `gaia_source` with `source='simbad'` (and optionally into `simbad_cache`).
 
 Simbad is rate-limited (recommended 5–10 queries/sec); the client batches requests and adds a short delay between them.
 

@@ -39,6 +39,18 @@ def init_database(db_path: Path):
     if cursor.fetchone()[0] == 0:
         cursor.execute("ALTER TABLE gaia_source ADD COLUMN bp_rp REAL")
 
+    # Add source column if missing (gaia, vizier, simbad); backfill existing rows as 'gaia'
+    cursor.execute(
+        """
+        SELECT COUNT(*) FROM pragma_table_info('gaia_source') WHERE name='source'
+        """
+    )
+    if cursor.fetchone()[0] == 0:
+        cursor.execute(
+            "ALTER TABLE gaia_source ADD COLUMN source TEXT NOT NULL DEFAULT 'gaia'"
+        )
+        cursor.execute("UPDATE gaia_source SET source = 'gaia' WHERE source IS NULL")
+
     # Table for 3D star positions (used with --dump-positions)
     cursor.execute(
         """
@@ -93,12 +105,27 @@ def init_database(db_path: Path):
 
 
 def get_star_count(db_path: Path) -> int:
-    """Get the number of stars in the database."""
+    """Get the total number of stars in the database (all sources)."""
     if not db_path.exists():
         return 0
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM gaia_source")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def get_star_count_by_source(db_path: Path, source: str) -> int:
+    """Get the number of stars in the database for a given source ('gaia', 'vizier', or 'simbad')."""
+    if not db_path.exists():
+        return 0
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) FROM gaia_source WHERE source = ?",
+        (source,),
+    )
     count = cursor.fetchone()[0]
     conn.close()
     return count
@@ -171,8 +198,9 @@ def cache_target_star(db_path: Path, target_data) -> bool:
         # Use INSERT OR IGNORE to avoid duplicates
         cursor.execute(
             """
-            INSERT OR IGNORE INTO gaia_source (source_id, ra, dec, parallax, phot_g_mean_mag)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO gaia_source
+            (source_id, ra, dec, parallax, phot_g_mean_mag, source)
+            VALUES (?, ?, ?, ?, ?, 'gaia')
             """,
             (
                 target_data["source_id"],

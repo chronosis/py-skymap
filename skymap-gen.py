@@ -42,6 +42,7 @@ from lib.constants import (
 from lib.sqlite_helper import (
     init_database as _sqlite_init_database,
     get_star_count as _sqlite_get_star_count,
+    get_star_count_by_source as _sqlite_get_star_count_by_source,
     get_target_star_from_cache as _sqlite_get_target_star_from_cache,
     cache_target_star as _sqlite_cache_target_star,
     clear_star_positions_for_target as _sqlite_clear_star_positions_for_target,
@@ -205,55 +206,140 @@ def check_sky_coverage_bias(db_path):
     return False, None
 
 def ensure_cache_populated(force_refresh=False, star_limit=None):
-    """Ensure the SQLite cache is populated with Gaia data.
+    """Ensure the SQLite cache is populated from both Gaia and Simbad.
     
-    This function checks the cache first and only queries Gaia API if:
-    - Cache is empty, OR
-    - force_refresh=True, OR
-    - Cache has fewer stars than star_limit
-    
-    All processing operations should use load_stars_from_cache() to read from
-    the SQLite database, never querying Gaia directly.
+    For Gaia, we top up to ``star_limit`` (if provided) using the Gaia Archive
+    (with VizieR fallback on 408 timeouts). For Simbad, we use TAP to fetch
+    additional stars in bulk so that the number of Simbad-sourced stars in
+    ``gaia_source`` matches the Gaia target as closely as possible.
     
     Args:
-        force_refresh: If True, delete existing cache and re-download
-        star_limit: Maximum number of stars to cache (None = no limit)
+        force_refresh: If True, delete existing cache and re-download.
+        star_limit: Target number of stars to cache per source (None = no limit).
     
     Returns:
-        Number of stars in the cache
+        Total number of stars in the cache.
     """
-    # Initialize database
     if force_refresh and CACHE_DB.exists():
         print(f"Removing existing database {CACHE_DB}...")
         CACHE_DB.unlink()
-    
-    # Check if cache already exists and is sufficient
+
+    # Ensure schema is up to date (creates DB if missing, adds source column if missing)
+    init_database(CACHE_DB)
+
     existing_count = get_star_count(CACHE_DB)
+    gaia_count = _sqlite_get_star_count_by_source(CACHE_DB, "gaia")
+    simbad_count = _sqlite_get_star_count_by_source(CACHE_DB, "simbad")
+
+    # We never try to pull an unbounded number of stars from Simbad; bulk TAP
+    # queries are capped for practicality and service limits.
+    SIMBAD_BULK_MAX = DEFAULT_STAR_LIMIT
+
     if existing_count > 0 and not force_refresh:
-        # Check for sky coverage bias
         has_bias, bias_msg = check_sky_coverage_bias(CACHE_DB)
         if has_bias:
             print(f"\n{bias_msg}\n")
-        if star_limit is not None and existing_count >= star_limit:
-            print(f"Cache has {existing_count:,} stars (meets limit of {star_limit:,}). Using cached data.")
-            return existing_count
-        else:
-            print(f"Cache has {existing_count:,} stars. Checking if more needed...")
-            if star_limit is None:
-                # No limit specified, cache is sufficient
-                print("Using existing cache (no limit specified).")
+
+        if star_limit is not None:
+            # Gaia can reasonably reach star_limit; Simbad is capped.
+            target_simbad = min(star_limit, SIMBAD_BULK_MAX)
+            gaia_ok = gaia_count >= star_limit
+            simbad_ok = simbad_count >= target_simbad
+            if gaia_ok and simbad_ok:
+                print(
+                    f"Cache has {existing_count:,} stars "
+                    f"(gaia: {gaia_count:,}, simbad: {simbad_count:,}). "
+                    f"Meets targets (gaia ≥ {star_limit:,}, simbad ≥ {target_simbad:,}). Using cached data."
+                )
                 return existing_count
-            else:
-                # Need more stars, continue downloading from Gaia then VizieR
-                print(f"Continuing download to reach {star_limit:,} stars...")
-                _download_from_gaia(star_limit, existing_count)
-                _download_from_vizier(star_limit)
-                return get_star_count(CACHE_DB)
-    
-    # Cache is empty or force_refresh, download from Gaia then VizieR
-    _download_from_gaia(star_limit, 0)
-    _download_from_vizier(star_limit)
+            print(
+                f"Cache has {existing_count:,} stars "
+                f"(gaia: {gaia_count:,}, simbad: {simbad_count:,}). "
+                f"Targets: gaia {star_limit:,}, simbad {target_simbad:,} (cap {SIMBAD_BULK_MAX:,}). Topping up..."
+            )
+        else:
+            # No explicit limit: require at least some data from both sources
+            if gaia_count > 0 and simbad_count > 0:
+                print(
+                    f"Cache has {existing_count:,} stars "
+                    f"(gaia: {gaia_count:,}, simbad: {simbad_count:,}). "
+                    "Using cached data."
+                )
+                return existing_count
+            print(
+                f"Cache has {existing_count:,} stars "
+                f"(gaia: {gaia_count:,}, simbad: {simbad_count:,}). "
+                "Topping up source(s)..."
+            )
+
+    # Top up Gaia first (VizieR is used only when Gaia returns 408 timeout)
+    if star_limit is not None:
+        if gaia_count < star_limit:
+            _download_from_gaia(star_limit, gaia_count)
+    else:
+        if gaia_count == 0:
+            _download_from_gaia(None, gaia_count)
+
+    # Top up Simbad using bulk TAP (no pre-defined list of names). When star_limit
+    # is provided we use the same value as the Simbad target but the helper will
+    # internally cap that to a reasonable maximum.
+    _ensure_simbad_ingested(star_limit=star_limit)
     return get_star_count(CACHE_DB)
+
+
+def _ensure_simbad_ingested(star_limit=None):
+    """Ensure Simbad-sourced stars are present in ``gaia_source``.
+    
+    If ``star_limit`` is provided, we attempt to fetch the remaining number of
+    missing Simbad stars (up to that limit) via TAP. When ``star_limit`` is
+    None, we ensure at least a baseline number of Simbad stars are present.
+    """
+    from lib.simbad_client import ingest_simbad_bulk_into_gaia_source
+
+    simbad_count = _sqlite_get_star_count_by_source(CACHE_DB, "simbad")
+
+    if star_limit is not None:
+        to_fetch = max(0, star_limit - simbad_count)
+        if to_fetch <= 0:
+            return
+        print(
+            f"\nFetching up to {to_fetch:,} additional Simbad stars into cache "
+            f"(have {simbad_count:,}, target {star_limit:,})..."
+        )
+        try:
+            n = ingest_simbad_bulk_into_gaia_source(
+                CACHE_DB,
+                to_fetch,
+                cache_simbad=True,
+            )
+            if n > 0:
+                print(f"  Inserted {n:,} Simbad-sourced rows into gaia_source.")
+        except Exception as e:
+            print(
+                f"  Simbad bulk ingestion failed (continuing with Gaia cache only): {e}",
+                file=sys.stderr,
+            )
+    else:
+        # No explicit limit: ensure we have at least a baseline of Simbad stars
+        if simbad_count > 0:
+            return
+        baseline = DEFAULT_STAR_LIMIT
+        print(
+            f"\nNo Simbad stars in cache; fetching ~{baseline:,} stars from Simbad TAP..."
+        )
+        try:
+            n = ingest_simbad_bulk_into_gaia_source(
+                CACHE_DB,
+                baseline,
+                cache_simbad=True,
+            )
+            if n > 0:
+                print(f"  Inserted {n:,} Simbad-sourced rows into gaia_source.")
+        except Exception as e:
+            print(
+                f"  Simbad bulk ingestion failed (continuing with Gaia cache only): {e}",
+                file=sys.stderr,
+            )
 
 def _update_progress_bar(pbar, chunk_num, chunk_inserted, duplicates, stars_inserted, star_limit):
     """Helper function to update progress bar, abstracting HAS_TQDM checks.
@@ -303,10 +389,10 @@ def _download_from_gaia(star_limit=None, existing_count=0):
 
 
 def _download_from_vizier(star_limit=None):
-    """Download a roughly equivalent amount of Gaia DR3 data from VizieR and merge into cache.
+    """Download Gaia DR3 data from VizieR and merge into cache.
 
-    Uses the same star_limit as the Gaia request (or DEFAULT_STAR_LIMIT if None)
-    so the cache is filled from both sources. Rows are merged with INSERT OR IGNORE.
+    Not used in the main cache-fill flow (Gaia is primary; VizieR is only used
+    when Gaia times out, from inside gaia_client). Kept for manual use or scripts.
     Returns number of new rows inserted from VizieR.
     """
     from lib.vizier_client import GAIA_VIZIER_CATALOG, download_vizier_catalog

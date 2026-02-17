@@ -135,8 +135,8 @@ def download_vizier_catalog(
         cursor.executemany(
             """
             INSERT OR IGNORE INTO gaia_source
-            (source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp, source)
+            VALUES (?, ?, ?, ?, ?, ?, 'vizier')
             """,
             rows,
         )
