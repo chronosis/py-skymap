@@ -10,7 +10,8 @@ from pathlib import Path
 
 from astropy.table import Table
 
-from .sqlite_helper import init_database
+from .constants import ASSUMED_BACKGROUND_DISTANCE_PC
+from .sqlite_helper import init_database, ra_dec_distance_to_cartesian, insert_star_cartesian_earth_batch
 
 # Gaia DR3 on VizieR: map VizieR column names to gaia_source schema.
 # VizieR may use Source, RA_ICRS, DE_ICRS, Plx, Gmag, BP-RP (or BP-RP_).
@@ -143,5 +144,16 @@ def download_vizier_catalog(
         n = cursor.rowcount
         conn.commit()
         conn.close()
+        # Populate Earth-centric Cartesian cache
+        cartesian_rows = []
+        for (sid, ra, dec, plx, gmag, bp_rp) in rows:
+            if plx > 0 and plx == plx:  # finite check
+                d_pc = 1000.0 / plx
+            else:
+                d_pc = ASSUMED_BACKGROUND_DISTANCE_PC
+            x, y, z = ra_dec_distance_to_cartesian(ra, dec, d_pc)
+            cartesian_rows.append((sid, x, y, z, "vizier"))
+        if cartesian_rows:
+            insert_star_cartesian_earth_batch(cache_db, cartesian_rows)
         return n
     return 0

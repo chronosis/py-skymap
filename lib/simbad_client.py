@@ -12,7 +12,14 @@ from pathlib import Path
 
 from astropy.table import Table
 
-from .sqlite_helper import init_database, get_simbad_from_cache, put_simbad_in_cache
+from .constants import ASSUMED_BACKGROUND_DISTANCE_PC
+from .sqlite_helper import (
+    init_database,
+    get_simbad_from_cache,
+    put_simbad_in_cache,
+    ra_dec_distance_to_cartesian,
+    insert_star_cartesian_earth_batch,
+)
 
 # Rate limit: seconds between Simbad requests (batch counts as one).
 SIMBAD_QUERY_DELAY_SEC = 0.2
@@ -353,6 +360,17 @@ def ingest_simbad_bulk_into_gaia_source(
     n = cursor.rowcount
     conn.commit()
     conn.close()
+    # Populate Earth-centric Cartesian cache
+    cartesian_rows = []
+    for (sid, ra, dec, plx, gmag, bp_rp) in gaia_rows:
+        if plx and plx > 0 and plx == plx:
+            d_pc = 1000.0 / plx
+        else:
+            d_pc = ASSUMED_BACKGROUND_DISTANCE_PC
+        x, y, z = ra_dec_distance_to_cartesian(ra, dec, d_pc)
+        cartesian_rows.append((sid, x, y, z, "simbad"))
+    if cartesian_rows:
+        insert_star_cartesian_earth_batch(cache_db, cartesian_rows)
     return n
 
 
@@ -414,4 +432,15 @@ def ingest_simbad_into_gaia_source(
     n = cursor.rowcount
     conn.commit()
     conn.close()
+    # Populate Earth-centric Cartesian cache
+    cartesian_rows = []
+    for (sid, ra, dec, plx, gmag, bp_rp) in gaia_rows:
+        if plx and plx > 0 and plx == plx:
+            d_pc = 1000.0 / plx
+        else:
+            d_pc = ASSUMED_BACKGROUND_DISTANCE_PC
+        x, y, z = ra_dec_distance_to_cartesian(ra, dec, d_pc)
+        cartesian_rows.append((sid, x, y, z, "simbad"))
+    if cartesian_rows:
+        insert_star_cartesian_earth_batch(cache_db, cartesian_rows)
     return n

@@ -45,8 +45,6 @@ from lib.sqlite_helper import (
     get_star_count_by_source as _sqlite_get_star_count_by_source,
     get_target_star_from_cache as _sqlite_get_target_star_from_cache,
     cache_target_star as _sqlite_cache_target_star,
-    clear_star_positions_for_target as _sqlite_clear_star_positions_for_target,
-    insert_star_positions_batch as _sqlite_insert_star_positions_batch,
     load_stars_from_cache as _sqlite_load_stars_from_cache,
     check_sky_coverage_bias as _sqlite_check_sky_coverage_bias,
 )
@@ -158,16 +156,6 @@ def get_target_star_from_gaia(target_star_name):
 def cache_target_star(db_path, target_data):
     """Cache the target star via shared SQLite helper."""
     return _sqlite_cache_target_star(db_path, target_data)
-
-
-def clear_star_positions_for_target(db_path, target_star_name):
-    """Remove all star_positions_3d rows for the given target via shared helper."""
-    return _sqlite_clear_star_positions_for_target(db_path, target_star_name)
-
-
-def insert_star_positions_batch(db_path, target_star_name, rows):
-    """Insert a batch of positions via shared SQLite helper."""
-    return _sqlite_insert_star_positions_batch(db_path, target_star_name, rows)
 
 
 def load_stars_from_cache(db_path, limit=None, offset=0):
@@ -413,13 +401,14 @@ def _download_from_vizier(star_limit=None):
         return 0
 
 def process_star_chunk(chunk_data, target_3d, dump_positions=False, magnitude_limit=None):
-    """Process a chunk of stars and return valid stars for plotting or dumping.
+    """Process a chunk of stars and return valid stars for plotting.
     
     Handles both nearby stars (with valid parallax) and background stars
     (with 0 or invalid parallax) by using a large assumed distance.
+    Uses cached Earth-centric Cartesian coordinates from star_cartesian_earth
+    when available to avoid recomputation.
     
-    If dump_positions=True, magnitude filter is skipped so all valid stars
-    are returned for database output.
+    If dump_positions=True, magnitude filter is skipped (for testing).
     
     magnitude_limit: faintest magnitude to include (uses VISIBLE_MAG_LIMIT if None).
     """
@@ -430,6 +419,16 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False, magnitude_li
     dec_values = chunk_data['dec'].value if hasattr(chunk_data['dec'], 'value') else chunk_data['dec']
     mag_values = chunk_data['phot_g_mean_mag'].value if hasattr(chunk_data['phot_g_mean_mag'], 'value') else chunk_data['phot_g_mean_mag']
     bp_rp_values = chunk_data['bp_rp'] if 'bp_rp' in chunk_data.colnames else np.full(len(source_ids), np.nan)
+    # Optional cached Earth-centric Cartesian (from star_cartesian_earth)
+    has_cached_cartesian = (
+        'x_earth_pc' in chunk_data.colnames
+        and 'y_earth_pc' in chunk_data.colnames
+        and 'z_earth_pc' in chunk_data.colnames
+    )
+    if has_cached_cartesian:
+        x_earth_raw = np.asarray(chunk_data['x_earth_pc'], dtype=float)
+        y_earth_raw = np.asarray(chunk_data['y_earth_pc'], dtype=float)
+        z_earth_raw = np.asarray(chunk_data['z_earth_pc'], dtype=float)
     
     # Build master mask: combine all initial filtering conditions to minimize memory copies
     # Filter for valid RA/Dec and magnitude (must be finite, but no magnitude limit)
@@ -462,6 +461,10 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False, magnitude_li
     mag_values = mag_values[master_mask]
     bp_rp_values = bp_rp_values[master_mask]
     has_valid_parallax = valid_parallax_mask[master_mask]
+    if has_cached_cartesian:
+        x_earth_cached = x_earth_raw[master_mask]
+        y_earth_cached = y_earth_raw[master_mask]
+        z_earth_cached = z_earth_raw[master_mask]
     
     # Identify background objects: stars without valid parallax OR stars beyond distance threshold
     # These should be treated as fixed background points (same position regardless of target)
@@ -490,12 +493,25 @@ def process_star_chunk(chunk_data, target_3d, dump_positions=False, magnitude_li
         bright_bg_norms = np.linalg.norm(bright_bg_cart, axis=1, keepdims=True)
         bright_bg_cart = bright_bg_cart / np.where(bright_bg_norms > 1e-10, bright_bg_norms, 1.0)  # Unit direction vectors
     
-    # Create 3D vectors relative to Earth in ICRS frame for all stars
-    stars_earth_icrs = SkyCoord(ra=ra_values*u.deg, dec=dec_values*u.deg, 
-                                distance=d_earth_pc*u.pc, frame='icrs')
-    
-    # Get cartesian coordinates in ICRS frame (both stars and target)
-    stars_cart = stars_earth_icrs.cartesian.xyz.value.T  # Shape: (N, 3) - positions from Earth
+    # Create 3D vectors relative to Earth in ICRS frame for all stars.
+    # Use cached Earth-centric Cartesian when available (avoids SkyCoord computation).
+    if has_cached_cartesian:
+        cached_valid = (
+            np.isfinite(x_earth_cached) & np.isfinite(y_earth_cached) & np.isfinite(z_earth_cached)
+        )
+        if np.all(cached_valid):
+            stars_cart = np.column_stack([x_earth_cached, y_earth_cached, z_earth_cached])
+        else:
+            stars_earth_icrs = SkyCoord(ra=ra_values*u.deg, dec=dec_values*u.deg,
+                                        distance=d_earth_pc*u.pc, frame='icrs')
+            stars_cart = stars_earth_icrs.cartesian.xyz.value.T.copy()
+            stars_cart[cached_valid] = np.column_stack([
+                x_earth_cached[cached_valid], y_earth_cached[cached_valid], z_earth_cached[cached_valid]
+            ])
+    else:
+        stars_earth_icrs = SkyCoord(ra=ra_values*u.deg, dec=dec_values*u.deg,
+                                    distance=d_earth_pc*u.pc, frame='icrs')
+        stars_cart = stars_earth_icrs.cartesian.xyz.value.T  # Shape: (N, 3) - positions from Earth
     target_cart = target_3d.cartesian.xyz.value  # Shape: (3,) - target position from Earth
     
     # Calculate vectors from target to each star (in ICRS cartesian coordinates)
@@ -1736,10 +1752,6 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                              distance=target_dist_pc*u.pc, frame='icrs')
         print(f"  Target 3D position: RA={target_ra:.6f}°, Dec={target_dec:.6f}°, Distance={target_dist_pc:.2f} pc")
     
-    if dump_positions:
-        cleared = clear_star_positions_for_target(CACHE_DB, target_star_name)
-        print(f"  Cleared {cleared:,} existing rows for target '{target_star_name}' in star_positions_3d.")
-
     # 3. Ensure cache is populated (only queries Gaia if needed)
     num_stars = ensure_cache_populated(force_refresh=force_refresh, star_limit=star_limit)
     
@@ -1786,18 +1798,6 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                 all_bp_rp.append(result['bp_rp'])
                 all_distance_pc.append(result['distance_pc'])
                 total_valid = sum(len(x) for x in all_azimuth_rad)
-                
-                if dump_positions:
-                    rows = list(zip(
-                        np.asarray(result['source_id']).tolist(),
-                        result['x_pc'].tolist(),
-                        result['y_pc'].tolist(),
-                        result['z_pc'].tolist(),
-                        result['azimuth_rad'].tolist(),
-                        result['elevation_rad'].tolist(),
-                        result['m_new'].tolist(),
-                    ))
-                    insert_star_positions_batch(CACHE_DB, target_star_name, rows)
                 
                 if HAS_TQDM:
                     pbar.update(chunk_size)
@@ -1877,8 +1877,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     del all_azimuth_rad, all_elevation_rad, all_z, all_m_plot, all_bp_rp
     
     if dump_positions:
-        print(f"\nDumped {total_valid:,} star positions to star_positions_3d for target '{target_star_name}'.")
-        print("Use SQLite to inspect: SELECT * FROM star_positions_3d WHERE target_star_name = ? LIMIT 20;")
+        print(f"\nProcessed {total_valid:,} stars for target '{target_star_name}' (no images generated).")
         return
     
     # 5. Plotting Northern and Southern Hemispheres based on z-component
@@ -2339,7 +2338,7 @@ Examples:
   {sys.argv[0]} "Sol,Aldebaran,Proxima Centauri"  # Multiple stars (comma-separated; quote names with spaces)
   {sys.argv[0]} HD118246 100000             # Generate maps with ~100,000 stars
   {sys.argv[0]} Sol 50000 --magnitude-limit 13  # Include stars up to magnitude 13
-  {sys.argv[0]} Sol 50000 --dump-positions  # Dump 3D positions for Sol (no images); verify calc
+  {sys.argv[0]} Sol 50000 --dump-positions  # Process without generating images (for testing)
         """
     )
     parser.add_argument(
@@ -2362,7 +2361,7 @@ Examples:
     parser.add_argument(
         '--dump-positions',
         action='store_true',
-        help='Write 3D positions to star_positions_3d table; skip image generation'
+        help='Process stars without generating images (for testing)'
     )
     parser.add_argument(
         '--magnitude-limit',

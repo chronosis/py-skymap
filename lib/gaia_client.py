@@ -5,8 +5,8 @@ from astroquery.gaia import Gaia
 from astropy.table import Table
 import numpy as np
 
-from .constants import GAIA_MAX_RETRIES, GAIA_MIN_MAGNITUDE_THRESHOLD
-from .sqlite_helper import init_database
+from .constants import ASSUMED_BACKGROUND_DISTANCE_PC, GAIA_MAX_RETRIES, GAIA_MIN_MAGNITUDE_THRESHOLD
+from .sqlite_helper import init_database, ra_dec_distance_to_cartesian, insert_star_cartesian_earth_batch
 from .progress import HAS_TQDM, tqdm
 
 
@@ -205,6 +205,18 @@ def _download_from_gaia(cache_db: Path, chunk_size: int, star_limit=None, existi
                 data_to_insert,
             )
             conn.commit()
+
+            # Populate Earth-centric Cartesian cache for newly inserted stars
+            cartesian_rows = []
+            for (sid, ra, dec, plx, gmag, bp_rp) in data_to_insert:
+                if plx > 0 and np.isfinite(plx):
+                    d_pc = 1000.0 / plx
+                else:
+                    d_pc = ASSUMED_BACKGROUND_DISTANCE_PC
+                x, y, z = ra_dec_distance_to_cartesian(ra, dec, d_pc)
+                cartesian_rows.append((sid, x, y, z, "gaia"))
+            if cartesian_rows:
+                insert_star_cartesian_earth_batch(cache_db, cartesian_rows)
 
             chunk_inserted = cursor.rowcount
             duplicates = len(data_to_insert) - chunk_inserted

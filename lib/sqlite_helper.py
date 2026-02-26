@@ -1,3 +1,4 @@
+import math
 import sqlite3
 import datetime
 from pathlib import Path
@@ -9,7 +10,7 @@ from astropy.table import Table
 
 
 def init_database(db_path: Path):
-    """Initialize SQLite database with gaia_source and star_positions_3d tables."""
+    """Initialize SQLite database with gaia_source and star_cartesian_earth tables."""
     # Ensure the directory exists
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -51,26 +52,17 @@ def init_database(db_path: Path):
         )
         cursor.execute("UPDATE gaia_source SET source = 'gaia' WHERE source IS NULL")
 
-    # Table for 3D star positions (used with --dump-positions)
+    # Earth-centric Cartesian coordinates (ICRS, origin at Solar System barycenter).
+    # Same for all targets; populated when stars are ingested.
     cursor.execute(
         """
-        CREATE TABLE IF NOT EXISTS star_positions_3d (
-            source_id INTEGER NOT NULL,
-            target_star_name TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS star_cartesian_earth (
+            source_id INTEGER PRIMARY KEY,
             x_pc REAL NOT NULL,
             y_pc REAL NOT NULL,
             z_pc REAL NOT NULL,
-            azimuth_rad REAL NOT NULL,
-            elevation_rad REAL NOT NULL,
-            magnitude REAL NOT NULL,
-            PRIMARY KEY (source_id, target_star_name)
+            source TEXT NOT NULL DEFAULT 'gaia'
         )
-        """
-    )
-    cursor.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_star_positions_target
-        ON star_positions_3d(target_star_name)
         """
     )
 
@@ -220,37 +212,32 @@ def cache_target_star(db_path: Path, target_data) -> bool:
         return False
 
 
-def clear_star_positions_for_target(db_path: Path, target_star_name: str) -> int:
-    """Remove all star_positions_3d rows for the given target."""
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-    cursor.execute(
-        "DELETE FROM star_positions_3d WHERE target_star_name = ?",
-        (target_star_name,),
-    )
-    deleted = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return deleted
+def ra_dec_distance_to_cartesian(ra_deg: float, dec_deg: float, d_pc: float) -> tuple[float, float, float]:
+    """Convert ra (deg), dec (deg), distance (pc) to ICRS Cartesian x, y, z in parsecs."""
+    ra_rad = math.radians(ra_deg)
+    dec_rad = math.radians(dec_deg)
+    cos_dec = math.cos(dec_rad)
+    x = d_pc * cos_dec * math.cos(ra_rad)
+    y = d_pc * cos_dec * math.sin(ra_rad)
+    z = d_pc * math.sin(dec_rad)
+    return (x, y, z)
 
 
-def insert_star_positions_batch(db_path: Path, target_star_name: str, rows):
-    """Insert a batch of (source_id, x_pc, y_pc, z_pc, azimuth_rad, elevation_rad, magnitude)."""
+def insert_star_cartesian_earth_batch(
+    db_path: Path,
+    rows: list[tuple[int, float, float, float, str]],
+) -> int:
+    """Insert a batch of (source_id, x_pc, y_pc, z_pc, source) into star_cartesian_earth."""
     if not rows:
         return 0
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
-    data = [
-        (r[0], target_star_name, r[1], r[2], r[3], r[4], r[5], r[6])
-        for r in rows
-    ]
     cursor.executemany(
         """
-        INSERT OR REPLACE INTO star_positions_3d
-        (source_id, target_star_name, x_pc, y_pc, z_pc, azimuth_rad, elevation_rad, magnitude)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO star_cartesian_earth (source_id, x_pc, y_pc, z_pc, source)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        data,
+        rows,
     )
     n = cursor.rowcount
     conn.commit()
@@ -262,6 +249,8 @@ def load_stars_from_cache(db_path: Path, limit=None, offset: int = 0):
     """Load stars from SQLite cache.
 
     This function ONLY reads from the cache, never queries Gaia.
+    Earth-centric Cartesian (x_pc, y_pc, z_pc) are included when available from
+    star_cartesian_earth.
     """
     if not db_path.exists():
         raise RuntimeError(
@@ -271,26 +260,16 @@ def load_stars_from_cache(db_path: Path, limit=None, offset: int = 0):
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
 
-    if limit is not None:
-        cursor.execute(
-            """
-            SELECT source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp
-            FROM gaia_source
-            ORDER BY source_id
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
-        )
-    else:
-        cursor.execute(
-            """
-            SELECT source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp
-            FROM gaia_source
-            ORDER BY source_id
-            LIMIT ? OFFSET ?
-            """,
-            (1000000, offset),
-        )  # Large limit if none specified
+    select_sql = """
+        SELECT g.source_id, g.ra, g.dec, g.parallax, g.phot_g_mean_mag, g.bp_rp,
+               c.x_pc, c.y_pc, c.z_pc
+        FROM gaia_source g
+        LEFT JOIN star_cartesian_earth c ON g.source_id = c.source_id
+        ORDER BY g.source_id
+        LIMIT ? OFFSET ?
+    """
+    limit_val = limit if limit is not None else 1000000
+    cursor.execute(select_sql, (limit_val, offset))
 
     rows = cursor.fetchall()
     conn.close()
@@ -305,6 +284,10 @@ def load_stars_from_cache(db_path: Path, limit=None, offset: int = 0):
     parallax_values = [row[3] for row in rows]
     mag_values = [row[4] for row in rows]
     bp_rp_values = [row[5] if row[5] is not None else np.nan for row in rows]
+    # Cached Earth-centric Cartesian (None when not cached)
+    x_pc_values = [row[6] if row[6] is not None else np.nan for row in rows]
+    y_pc_values = [row[7] if row[7] is not None else np.nan for row in rows]
+    z_pc_values = [row[8] if row[8] is not None else np.nan for row in rows]
 
     return Table(
         {
@@ -314,6 +297,9 @@ def load_stars_from_cache(db_path: Path, limit=None, offset: int = 0):
             "parallax": parallax_values * u.mas,
             "phot_g_mean_mag": mag_values,
             "bp_rp": bp_rp_values,
+            "x_earth_pc": x_pc_values,
+            "y_earth_pc": y_pc_values,
+            "z_earth_pc": z_pc_values,
         }
     )
 
