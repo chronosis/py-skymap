@@ -1,95 +1,91 @@
-"""
-DEPRECATED: This module is superseded by pg_helper.py (PostgreSQL backend).
-
-It is retained solely for the one-time migrate_sqlite_to_pg.py migration
-script and the legacy drop_star_positions_3d.py utility. All new code
-should import from lib.pg_helper instead.
-"""
-
 import math
-import sqlite3
 import datetime
-from pathlib import Path
 
 import numpy as np
+import psycopg2
+import psycopg2.extras
 from astropy.coordinates import SkyCoord
 from astropy import units as u
 from astropy.table import Table
 
 
-def init_database(db_path: Path):
-    """Initialize SQLite database with gaia_source and star_cartesian_earth tables."""
-    # Ensure the directory exists
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+def _get_conn(dsn: str):
+    """Open a new PostgreSQL connection."""
+    return psycopg2.connect(dsn)
+
+
+def _column_exists(cursor, table: str, column: str) -> bool:
+    """Check whether *column* exists on *table* via information_schema."""
+    cursor.execute(
+        """
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = %s AND column_name = %s
+        LIMIT 1
+        """,
+        (table, column),
+    )
+    return cursor.fetchone() is not None
+
+
+def init_database(dsn: str):
+    """Create tables if they don't exist and return an open connection.
+
+    Mirrors the schema of sqlite_helper.init_database but targets PostgreSQL.
+    Uses BIGINT for source_id (Gaia source IDs can exceed 32-bit range) and
+    DOUBLE PRECISION for coordinate / magnitude columns.
+    """
+    conn = _get_conn(dsn)
     cursor = conn.cursor()
 
-    # Create table with source_id as primary key
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS gaia_source (
-            source_id INTEGER PRIMARY KEY,
-            ra REAL NOT NULL,
-            dec REAL NOT NULL,
-            parallax REAL NOT NULL,
-            phot_g_mean_mag REAL NOT NULL,
-            bp_rp REAL
-        )
-        """
-    )
-    # Note: PRIMARY KEY automatically creates a unique index, so no manual index needed
-
-    # Add bp_rp column if it doesn't exist (for existing databases)
-    cursor.execute(
-        """
-        SELECT COUNT(*) FROM pragma_table_info('gaia_source') WHERE name='bp_rp'
-        """
-    )
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("ALTER TABLE gaia_source ADD COLUMN bp_rp REAL")
-
-    # Add source column if missing (gaia, vizier, simbad); backfill existing rows as 'gaia'
-    cursor.execute(
-        """
-        SELECT COUNT(*) FROM pragma_table_info('gaia_source') WHERE name='source'
-        """
-    )
-    if cursor.fetchone()[0] == 0:
-        cursor.execute(
-            "ALTER TABLE gaia_source ADD COLUMN source TEXT NOT NULL DEFAULT 'gaia'"
-        )
-        cursor.execute("UPDATE gaia_source SET source = 'gaia' WHERE source IS NULL")
-
-    # Earth-centric Cartesian coordinates (ICRS, origin at Solar System barycenter).
-    # Same for all targets; populated when stars are ingested.
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS star_cartesian_earth (
-            source_id INTEGER PRIMARY KEY,
-            x_pc REAL NOT NULL,
-            y_pc REAL NOT NULL,
-            z_pc REAL NOT NULL,
+            source_id BIGINT PRIMARY KEY,
+            ra DOUBLE PRECISION NOT NULL,
+            dec DOUBLE PRECISION NOT NULL,
+            parallax DOUBLE PRECISION NOT NULL,
+            phot_g_mean_mag DOUBLE PRECISION NOT NULL,
+            bp_rp DOUBLE PRECISION,
             source TEXT NOT NULL DEFAULT 'gaia'
         )
         """
     )
 
-    # Simbad cache: object lookups by identifier (main_id). Used to flesh out gaps
-    # with Simbad-sourced positions/magnitudes/parallax (e.g. objects not in Gaia).
+    if not _column_exists(cursor, "gaia_source", "bp_rp"):
+        cursor.execute("ALTER TABLE gaia_source ADD COLUMN bp_rp DOUBLE PRECISION")
+
+    if not _column_exists(cursor, "gaia_source", "source"):
+        cursor.execute(
+            "ALTER TABLE gaia_source ADD COLUMN source TEXT NOT NULL DEFAULT 'gaia'"
+        )
+        cursor.execute("UPDATE gaia_source SET source = 'gaia' WHERE source IS NULL")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS star_cartesian_earth (
+            source_id BIGINT PRIMARY KEY,
+            x_pc DOUBLE PRECISION NOT NULL,
+            y_pc DOUBLE PRECISION NOT NULL,
+            z_pc DOUBLE PRECISION NOT NULL,
+            source TEXT NOT NULL DEFAULT 'gaia'
+        )
+        """
+    )
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS simbad_cache (
             main_id TEXT PRIMARY KEY,
-            ra REAL NOT NULL,
-            dec REAL NOT NULL,
-            parallax_mas REAL,
-            vmag REAL,
+            ra DOUBLE PRECISION NOT NULL,
+            dec DOUBLE PRECISION NOT NULL,
+            parallax_mas DOUBLE PRECISION,
+            vmag DOUBLE PRECISION,
             otype TEXT,
             cached_at TEXT NOT NULL
         )
         """
     )
-    # Map requested names (e.g. "Sirius") to main_id (e.g. "* alf CMa") for cache lookup.
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS simbad_cache_aliases (
@@ -104,11 +100,9 @@ def init_database(db_path: Path):
     return conn
 
 
-def get_star_count(db_path: Path) -> int:
-    """Get the total number of stars in the database (all sources)."""
-    if not db_path.exists():
-        return 0
-    conn = sqlite3.connect(str(db_path))
+def get_star_count(dsn: str) -> int:
+    """Total number of stars across all sources."""
+    conn = _get_conn(dsn)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM gaia_source")
     count = cursor.fetchone()[0]
@@ -116,14 +110,12 @@ def get_star_count(db_path: Path) -> int:
     return count
 
 
-def get_star_count_by_source(db_path: Path, source: str) -> int:
-    """Get the number of stars in the database for a given source ('gaia', 'vizier', or 'simbad')."""
-    if not db_path.exists():
-        return 0
-    conn = sqlite3.connect(str(db_path))
+def get_star_count_by_source(dsn: str, source: str) -> int:
+    """Number of stars for a given source ('gaia', 'vizier', or 'simbad')."""
+    conn = _get_conn(dsn)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT COUNT(*) FROM gaia_source WHERE source = ?",
+        "SELECT COUNT(*) FROM gaia_source WHERE source = %s",
         (source,),
     )
     count = cursor.fetchone()[0]
@@ -131,36 +123,28 @@ def get_star_count_by_source(db_path: Path, source: str) -> int:
     return count
 
 
-def get_target_star_from_cache(db_path: Path, target_star_name: str):
-    """Check if target star is in cache by searching for matching coordinates.
+def get_target_star_from_cache(dsn: str, target_star_name: str):
+    """Search the cache for a star near the Simbad-resolved position.
 
-    Uses Simbad to get approximate coordinates, then searches cache for stars
-    within 1 arcminute. Returns None if not found in cache.
+    Returns a dict with source_id / ra / dec / parallax / phot_g_mean_mag,
+    or None if nothing is within 1 arcminute.
     """
-    if not db_path.exists():
-        return None
-
     try:
-        # Get approximate coordinates from Simbad
         simbad_coord = SkyCoord.from_name(target_star_name)
         ra_approx = simbad_coord.ra.deg
         dec_approx = simbad_coord.dec.deg
 
-        # Search in cache for stars near this position (within 1 arcminute = 0.0167 degrees)
-        # Use a simple distance calculation: sqrt((ra_diff)^2 + (dec_diff)^2)
-        conn = sqlite3.connect(str(db_path))
+        conn = _get_conn(dsn)
         cursor = conn.cursor()
 
-        # Search radius in degrees (1 arcminute)
         search_radius_deg = 0.0167
 
-        # Find stars within search radius, ordered by distance
         cursor.execute(
             """
             SELECT source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp,
-                   SQRT(POWER(ra - ?, 2) + POWER(dec - ?, 2)) AS distance
+                   SQRT(POWER(ra - %s, 2) + POWER(dec - %s, 2)) AS distance
             FROM gaia_source
-            WHERE ABS(ra - ?) < ? AND ABS(dec - ?) < ?
+            WHERE ABS(ra - %s) < %s AND ABS(dec - %s) < %s
             ORDER BY distance
             LIMIT 1
             """,
@@ -180,27 +164,27 @@ def get_target_star_from_cache(db_path: Path, target_star_name: str):
                 "parallax": row[3],
                 "phot_g_mean_mag": row[4],
             }
-    except Exception as e:  # pragma: no cover - defensive logging
+    except Exception as e:
         print(f"  Warning: Could not search cache for target star: {e}")
 
     return None
 
 
-def cache_target_star(db_path: Path, target_data) -> bool:
-    """Cache the target star in the SQLite database."""
+def cache_target_star(dsn: str, target_data) -> bool:
+    """Insert the target star into the cache (skip if already present)."""
     if target_data is None:
         return False
 
-    conn = sqlite3.connect(str(db_path))
+    conn = _get_conn(dsn)
     cursor = conn.cursor()
 
     try:
-        # Use INSERT OR IGNORE to avoid duplicates
         cursor.execute(
             """
-            INSERT OR IGNORE INTO gaia_source
+            INSERT INTO gaia_source
             (source_id, ra, dec, parallax, phot_g_mean_mag, source)
-            VALUES (?, ?, ?, ?, ?, 'gaia')
+            VALUES (%s, %s, %s, %s, %s, 'gaia')
+            ON CONFLICT (source_id) DO NOTHING
             """,
             (
                 target_data["source_id"],
@@ -214,13 +198,15 @@ def cache_target_star(db_path: Path, target_data) -> bool:
         cached = cursor.rowcount > 0
         conn.close()
         return cached
-    except Exception as e:  # pragma: no cover - defensive logging
+    except Exception as e:
         print(f"  Error caching target star: {e}")
         conn.close()
         return False
 
 
-def ra_dec_distance_to_cartesian(ra_deg: float, dec_deg: float, d_pc: float) -> tuple[float, float, float]:
+def ra_dec_distance_to_cartesian(
+    ra_deg: float, dec_deg: float, d_pc: float
+) -> tuple[float, float, float]:
     """Convert ra (deg), dec (deg), distance (pc) to ICRS Cartesian x, y, z in parsecs."""
     ra_rad = math.radians(ra_deg)
     dec_rad = math.radians(dec_deg)
@@ -232,20 +218,27 @@ def ra_dec_distance_to_cartesian(ra_deg: float, dec_deg: float, d_pc: float) -> 
 
 
 def insert_star_cartesian_earth_batch(
-    db_path: Path,
+    dsn: str,
     rows: list[tuple[int, float, float, float, str]],
 ) -> int:
-    """Insert a batch of (source_id, x_pc, y_pc, z_pc, source) into star_cartesian_earth."""
+    """Bulk-insert into star_cartesian_earth using execute_values for speed."""
     if not rows:
         return 0
-    conn = sqlite3.connect(str(db_path))
+    conn = _get_conn(dsn)
     cursor = conn.cursor()
-    cursor.executemany(
+    psycopg2.extras.execute_values(
+        cursor,
         """
-        INSERT OR REPLACE INTO star_cartesian_earth (source_id, x_pc, y_pc, z_pc, source)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO star_cartesian_earth (source_id, x_pc, y_pc, z_pc, source)
+        VALUES %s
+        ON CONFLICT (source_id) DO UPDATE SET
+            x_pc = EXCLUDED.x_pc,
+            y_pc = EXCLUDED.y_pc,
+            z_pc = EXCLUDED.z_pc,
+            source = EXCLUDED.source
         """,
         rows,
+        page_size=5000,
     )
     n = cursor.rowcount
     conn.commit()
@@ -253,31 +246,26 @@ def insert_star_cartesian_earth_batch(
     return n
 
 
-def load_stars_from_cache(db_path: Path, limit=None, offset: int = 0):
-    """Load stars from SQLite cache.
+def load_stars_from_cache(dsn: str, limit=None, offset: int = 0):
+    """Load stars from PostgreSQL cache (read-only, never queries Gaia).
 
-    This function ONLY reads from the cache, never queries Gaia.
-    Earth-centric Cartesian (x_pc, y_pc, z_pc) are included when available from
-    star_cartesian_earth.
+    Returns an astropy Table with the same columns as the SQLite version.
     """
-    if not db_path.exists():
-        raise RuntimeError(
-            f"Cache database {db_path} does not exist. Run ensure_cache_populated() first."
-        )
-
-    conn = sqlite3.connect(str(db_path))
+    conn = _get_conn(dsn)
     cursor = conn.cursor()
 
-    select_sql = """
+    limit_val = limit if limit is not None else 1_000_000
+    cursor.execute(
+        """
         SELECT g.source_id, g.ra, g.dec, g.parallax, g.phot_g_mean_mag, g.bp_rp,
                c.x_pc, c.y_pc, c.z_pc
         FROM gaia_source g
         LEFT JOIN star_cartesian_earth c ON g.source_id = c.source_id
         ORDER BY g.source_id
-        LIMIT ? OFFSET ?
-    """
-    limit_val = limit if limit is not None else 1000000
-    cursor.execute(select_sql, (limit_val, offset))
+        LIMIT %s OFFSET %s
+        """,
+        (limit_val, offset),
+    )
 
     rows = cursor.fetchall()
     conn.close()
@@ -285,14 +273,12 @@ def load_stars_from_cache(db_path: Path, limit=None, offset: int = 0):
     if not rows:
         return None
 
-    # Convert to astropy Table
     source_ids = [row[0] for row in rows]
     ra_values = [row[1] for row in rows]
     dec_values = [row[2] for row in rows]
     parallax_values = [row[3] for row in rows]
     mag_values = [row[4] for row in rows]
     bp_rp_values = [row[5] if row[5] is not None else np.nan for row in rows]
-    # Cached Earth-centric Cartesian (None when not cached)
     x_pc_values = [row[6] if row[6] is not None else np.nan for row in rows]
     y_pc_values = [row[7] if row[7] is not None else np.nan for row in rows]
     z_pc_values = [row[8] if row[8] is not None else np.nan for row in rows]
@@ -312,36 +298,32 @@ def load_stars_from_cache(db_path: Path, limit=None, offset: int = 0):
     )
 
 
-def get_simbad_from_cache(db_path: Path, identifier: str):
-    """Return a cached Simbad object by identifier (main_id or alias; case-insensitive).
-
-    Returns a dict with keys: main_id, ra, dec, parallax_mas, vmag, otype, cached_at,
-    or None if not in cache.
-    """
-    if not db_path.exists():
-        return None
-    conn = sqlite3.connect(str(db_path))
+def get_simbad_from_cache(dsn: str, identifier: str):
+    """Return a cached Simbad object by identifier (main_id or alias; case-insensitive)."""
+    conn = _get_conn(dsn)
     cursor = conn.cursor()
     key = identifier.strip()
-    # Resolve alias to main_id if present
+
     cursor.execute(
-        "SELECT main_id FROM simbad_cache_aliases WHERE LOWER(TRIM(alias)) = LOWER(?) LIMIT 1",
+        "SELECT main_id FROM simbad_cache_aliases WHERE LOWER(TRIM(alias)) = LOWER(%s) LIMIT 1",
         (key,),
     )
     alias_row = cursor.fetchone()
     if alias_row:
         key = alias_row[0]
+
     cursor.execute(
         """
         SELECT main_id, ra, dec, parallax_mas, vmag, otype, cached_at
         FROM simbad_cache
-        WHERE LOWER(TRIM(main_id)) = LOWER(?)
+        WHERE LOWER(TRIM(main_id)) = LOWER(%s)
         LIMIT 1
         """,
         (key,),
     )
     row = cursor.fetchone()
     conn.close()
+
     if row is None:
         return None
     return {
@@ -356,24 +338,18 @@ def get_simbad_from_cache(db_path: Path, identifier: str):
 
 
 def put_simbad_in_cache(
-    db_path: Path,
+    dsn: str,
     rows: list[dict],
     *,
     requested_identifiers: list[str] | None = None,
 ) -> int:
-    """Insert or replace Simbad objects in the cache.
-
-    Each dict must have: main_id, ra, dec; optional: parallax_mas, vmag, otype.
-    cached_at is set automatically.
-    If requested_identifiers is provided, it must match the order of rows (one per row);
-    each requested name is stored as an alias for the row's main_id so lookups by that
-    name hit the cache. Returns number of rows inserted/replaced.
-    """
+    """Insert or update Simbad objects in the cache."""
     if not rows:
         return 0
     now = datetime.datetime.utcnow().isoformat() + "Z"
-    conn = sqlite3.connect(str(db_path))
+    conn = _get_conn(dsn)
     cursor = conn.cursor()
+
     data = [
         (
             r["main_id"],
@@ -386,36 +362,46 @@ def put_simbad_in_cache(
         )
         for r in rows
     ]
-    cursor.executemany(
+    psycopg2.extras.execute_values(
+        cursor,
         """
-        INSERT OR REPLACE INTO simbad_cache
+        INSERT INTO simbad_cache
         (main_id, ra, dec, parallax_mas, vmag, otype, cached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES %s
+        ON CONFLICT (main_id) DO UPDATE SET
+            ra = EXCLUDED.ra,
+            dec = EXCLUDED.dec,
+            parallax_mas = EXCLUDED.parallax_mas,
+            vmag = EXCLUDED.vmag,
+            otype = EXCLUDED.otype,
+            cached_at = EXCLUDED.cached_at
         """,
         data,
+        page_size=1000,
     )
     n = cursor.rowcount
+
     if requested_identifiers and len(requested_identifiers) >= len(rows):
         for i, r in enumerate(rows):
             alias = requested_identifiers[i].strip()
             if alias and alias.lower() != r["main_id"].lower():
                 cursor.execute(
                     """
-                    INSERT OR REPLACE INTO simbad_cache_aliases (alias, main_id)
-                    VALUES (?, ?)
+                    INSERT INTO simbad_cache_aliases (alias, main_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (alias) DO UPDATE SET main_id = EXCLUDED.main_id
                     """,
                     (alias, r["main_id"]),
                 )
+
     conn.commit()
     conn.close()
     return n
 
 
-def get_all_simbad_cached(db_path: Path):
-    """Return all cached Simbad objects as a list of dicts (same keys as get_simbad_from_cache)."""
-    if not db_path.exists():
-        return []
-    conn = sqlite3.connect(str(db_path))
+def get_all_simbad_cached(dsn: str):
+    """Return all cached Simbad objects as a list of dicts."""
+    conn = _get_conn(dsn)
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -440,18 +426,14 @@ def get_all_simbad_cached(db_path: Path):
     ]
 
 
-def check_sky_coverage_bias(db_path: Path):
+def check_sky_coverage_bias(dsn: str):
     """Check if database has biased sky coverage (e.g., only northern hemisphere).
 
     Returns (has_bias, message) where has_bias is True if bias detected.
     """
-    if not db_path.exists():
-        return False, None
-
-    conn = sqlite3.connect(str(db_path))
+    conn = _get_conn(dsn)
     cursor = conn.cursor()
 
-    # Check dec distribution
     cursor.execute("SELECT COUNT(*) FROM gaia_source WHERE dec < 0")
     n_neg = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM gaia_source")
@@ -462,7 +444,6 @@ def check_sky_coverage_bias(db_path: Path):
         return False, None
 
     neg_ratio = n_neg / total
-    # If less than 10% have dec < 0, likely biased (should be ~50% for uniform sky)
     if neg_ratio < 0.1:
         return True, (
             f"WARNING: Database appears to have biased sky coverage. "
@@ -472,4 +453,3 @@ def check_sky_coverage_bias(db_path: Path):
         )
 
     return False, None
-

@@ -19,14 +19,14 @@ from pathlib import Path
 # Add project root so lib is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from lib.constants import CACHE_DB
+from lib.constants import PG_DSN
 from lib.simbad_client import query_simbad_and_cache
 from lib.star_data import get_bright_stars
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fetch Simbad data for named objects and cache in SQLite."
+        description="Fetch Simbad data for named objects and cache in PostgreSQL."
     )
     parser.add_argument(
         "names",
@@ -51,12 +51,12 @@ def main():
         print("No identifiers to fetch.")
         return 0
 
-    print(f"Fetching Simbad data for {len(identifiers)} object(s) into {CACHE_DB}...")
+    print(f"Fetching Simbad data for {len(identifiers)} object(s) into PostgreSQL...")
     total = 0
     for i in range(0, len(identifiers), args.batch_size):
         batch = identifiers[i : i + args.batch_size]
         try:
-            rows = query_simbad_and_cache(CACHE_DB, batch)
+            rows = query_simbad_and_cache(PG_DSN, batch)
             total += len(rows)
             print(f"  Batch {i // args.batch_size + 1}: cached {len(rows)}/{len(batch)}")
         except Exception as e:

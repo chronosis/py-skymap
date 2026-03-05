@@ -1,4 +1,9 @@
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 """
 Shared constants for skymap generation.
@@ -10,6 +15,11 @@ digging through the main script.
 # Cache and output locations
 CACHE_DB: Path = Path("gaia_cache/gaia_cache.db")
 IMAGES_DIR: Path = Path("images")
+
+# PostgreSQL connection string (loaded from .env or environment)
+PG_DSN: str = os.getenv(
+    "PG_DSN", "postgresql://skymap:skymap@localhost:5432/skymap_db"
+)
 
 # Gaia download defaults
 CHUNK_SIZE: int = 1_000_000  # Stars per chunk (reduced to avoid timeouts)

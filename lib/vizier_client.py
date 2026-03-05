@@ -3,15 +3,14 @@ Bulk download from VizieR and optionally merge into the gaia_source cache.
 
 VizieR hosts many published catalogues (including Gaia DR3 as I/355/gaiadr3).
 Use this to bulk-download star data when you prefer VizieR over the Gaia Archive
-or want to pull other VizieR catalogues into the same SQLite cache.
+or want to pull other VizieR catalogues into the same PostgreSQL cache.
 """
 
-from pathlib import Path
-
 from astropy.table import Table
+import psycopg2.extras
 
 from .constants import ASSUMED_BACKGROUND_DISTANCE_PC
-from .sqlite_helper import init_database, ra_dec_distance_to_cartesian, insert_star_cartesian_earth_batch
+from .pg_helper import init_database, ra_dec_distance_to_cartesian, insert_star_cartesian_earth_batch
 
 # Gaia DR3 on VizieR: map VizieR column names to gaia_source schema.
 # VizieR may use Source, RA_ICRS, DE_ICRS, Plx, Gmag, BP-RP (or BP-RP_).
@@ -86,18 +85,18 @@ def _extract_gaia_like_rows(table: Table) -> list[tuple]:
 
 def download_vizier_catalog(
     catalog_id: str,
-    cache_db: Path,
+    cache_db: str,
     *,
     row_limit: int | None = 50_000,
     merge_into_gaia: bool = True,
 ) -> int:
     """
     Download a VizieR catalog and, if it is Gaia DR3 (I/355/gaiadr3), merge into
-    gaia_source in the SQLite cache.
+    gaia_source in the PostgreSQL cache.
 
     Args:
         catalog_id: VizieR catalog identifier (e.g. "I/355/gaiadr3").
-        cache_db: Path to the cache database.
+        cache_db: PostgreSQL DSN connection string.
         row_limit: Max rows to download (None = use Vizier default; -1 = unlimited).
         merge_into_gaia: If True and catalog is Gaia DR3, insert into gaia_source.
 
@@ -133,13 +132,16 @@ def download_vizier_catalog(
             return 0
         conn = init_database(cache_db)
         cursor = conn.cursor()
-        cursor.executemany(
+        psycopg2.extras.execute_values(
+            cursor,
             """
-            INSERT OR IGNORE INTO gaia_source
+            INSERT INTO gaia_source
             (source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp, source)
-            VALUES (?, ?, ?, ?, ?, ?, 'vizier')
+            VALUES %s
+            ON CONFLICT (source_id) DO NOTHING
             """,
-            rows,
+            [(s, r, d, p, g, b, "vizier") for s, r, d, p, g, b in rows],
+            page_size=5000,
         )
         n = cursor.rowcount
         conn.commit()

@@ -1,12 +1,12 @@
 import time
-from pathlib import Path
 
 from astroquery.gaia import Gaia
 from astropy.table import Table
 import numpy as np
+import psycopg2.extras
 
 from .constants import ASSUMED_BACKGROUND_DISTANCE_PC, GAIA_MAX_RETRIES, GAIA_MIN_MAGNITUDE_THRESHOLD
-from .sqlite_helper import init_database, ra_dec_distance_to_cartesian, insert_star_cartesian_earth_batch
+from .pg_helper import init_database, ra_dec_distance_to_cartesian, insert_star_cartesian_earth_batch
 from .progress import HAS_TQDM, tqdm
 
 
@@ -57,14 +57,11 @@ def _extract_gaia_data_from_table(table: Table):
     ]
 
 
-def _download_from_gaia(cache_db: Path, chunk_size: int, star_limit=None, existing_count: int = 0):
-    """Download data from Gaia API and store in SQLite cache.
-
-    ⚠️ IMPORTANT: This is the ONLY function that queries Gaia API directly.
-    All other operations (processing, filtering, plotting) use the SQLite cache.
+def _download_from_gaia(cache_db: str, chunk_size: int, star_limit=None, existing_count: int = 0):
+    """Download data from Gaia API and store in PostgreSQL cache.
 
     Args:
-        cache_db: Path to cache database.
+        cache_db: PostgreSQL DSN connection string.
         chunk_size: Number of stars per chunk to request from Gaia.
         star_limit: Maximum number of stars to download (None = no limit)
         existing_count: Number of stars already in cache (for progress tracking)
@@ -196,13 +193,16 @@ def _download_from_gaia(cache_db: Path, chunk_size: int, star_limit=None, existi
                 print("  No valid rows in this chunk.")
                 break
 
-            cursor.executemany(
+            psycopg2.extras.execute_values(
+                cursor,
                 """
-                INSERT OR IGNORE INTO gaia_source
+                INSERT INTO gaia_source
                 (source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp, source)
-                VALUES (?, ?, ?, ?, ?, ?, 'gaia')
+                VALUES %s
+                ON CONFLICT (source_id) DO NOTHING
                 """,
-                data_to_insert,
+                [(s, r, d, p, g, b, "gaia") for s, r, d, p, g, b in data_to_insert],
+                page_size=5000,
             )
             conn.commit()
 

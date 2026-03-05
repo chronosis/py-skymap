@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bulk download a VizieR catalog into the local SQLite cache.
+Bulk download a VizieR catalog into the local PostgreSQL cache.
 
 For Gaia DR3 (I/355/gaiadr3), rows are merged into gaia_source so skymap-gen
 can use them like the Gaia Archive or CSV downloads. Other VizieR catalogues
@@ -19,13 +19,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from lib.constants import CACHE_DB
+from lib.constants import PG_DSN
 from lib.vizier_client import GAIA_VIZIER_CATALOG, download_vizier_catalog
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Bulk download a VizieR catalog into the gaia_cache SQLite database."
+        description="Bulk download a VizieR catalog into the PostgreSQL database."
     )
     parser.add_argument(
         "catalog",
@@ -70,11 +70,11 @@ def main():
         if row_limit is None:
             row_limit = 50_000
 
-    print(f"Downloading VizieR catalog {catalog_id} (limit={row_limit}) into {CACHE_DB}...")
+    print(f"Downloading VizieR catalog {catalog_id} (limit={row_limit}) into PostgreSQL...")
     try:
         n = download_vizier_catalog(
             catalog_id,
-            CACHE_DB,
+            PG_DSN,
             row_limit=row_limit,
             merge_into_gaia=not args.no_merge,
         )

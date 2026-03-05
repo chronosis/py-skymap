@@ -7,7 +7,6 @@ import os
 import sys
 import time
 import argparse
-import sqlite3
 from pathlib import Path
 from astropy.coordinates import SkyCoord, Distance, CartesianRepresentation
 from astropy import units as u
@@ -17,7 +16,7 @@ from astropy.table import Table
 from lib.progress import HAS_TQDM, tqdm
 
 from lib.constants import (
-    CACHE_DB,
+    PG_DSN,
     IMAGES_DIR,
     CHUNK_SIZE,
     DEFAULT_STAR_LIMIT,
@@ -40,14 +39,14 @@ from lib.constants import (
     TEXT_STROKE_COLOR,
     TEXT_STROKE_ALPHA,
 )
-from lib.sqlite_helper import (
-    init_database as _sqlite_init_database,
-    get_star_count as _sqlite_get_star_count,
-    get_star_count_by_source as _sqlite_get_star_count_by_source,
-    get_target_star_from_cache as _sqlite_get_target_star_from_cache,
-    cache_target_star as _sqlite_cache_target_star,
-    load_stars_from_cache as _sqlite_load_stars_from_cache,
-    check_sky_coverage_bias as _sqlite_check_sky_coverage_bias,
+from lib.pg_helper import (
+    init_database as _pg_init_database,
+    get_star_count as _pg_get_star_count,
+    get_star_count_by_source as _pg_get_star_count_by_source,
+    get_target_star_from_cache as _pg_get_target_star_from_cache,
+    cache_target_star as _pg_cache_target_star,
+    load_stars_from_cache as _pg_load_stars_from_cache,
+    check_sky_coverage_bias as _pg_check_sky_coverage_bias,
 )
 from lib.math3d import (
     get_relative_coords as _math_get_relative_coords,
@@ -85,18 +84,18 @@ def bp_rp_to_rgb(bp_rp, alpha=0.3):
     """Delegate to shared color helper."""
     return _plot_bp_rp_to_rgb(bp_rp, alpha=alpha)
 
-def init_database(db_path):
-    """Initialize or return SQLite database connection via shared helper."""
-    return _sqlite_init_database(db_path)
+def init_database(dsn):
+    """Initialize or return PostgreSQL database connection via shared helper."""
+    return _pg_init_database(dsn)
 
-def get_star_count(db_path):
+def get_star_count(dsn):
     """Get the number of stars in the database via shared helper."""
-    return _sqlite_get_star_count(db_path)
+    return _pg_get_star_count(dsn)
 
 
-def get_target_star_from_cache(db_path, target_star_name):
+def get_target_star_from_cache(dsn, target_star_name):
     """Check if target star is in cache via shared helper."""
-    return _sqlite_get_target_star_from_cache(db_path, target_star_name)
+    return _pg_get_target_star_from_cache(dsn, target_star_name)
 
 def get_target_star_from_gaia(target_star_name):
     """Query Gaia database for target star by name using crossmatch.
@@ -155,78 +154,56 @@ def get_target_star_from_gaia(target_star_name):
         print(f"  Error querying Gaia for target star: {e}")
         return None
 
-def cache_target_star(db_path, target_data):
-    """Cache the target star via shared SQLite helper."""
-    return _sqlite_cache_target_star(db_path, target_data)
+def cache_target_star(dsn, target_data):
+    """Cache the target star via shared PostgreSQL helper."""
+    return _pg_cache_target_star(dsn, target_data)
 
 
-def load_stars_from_cache(db_path, limit=None, offset=0):
-    """Load stars from SQLite cache via shared helper (no Gaia queries)."""
-    return _sqlite_load_stars_from_cache(db_path, limit=limit, offset=offset)
+def load_stars_from_cache(dsn, limit=None, offset=0):
+    """Load stars from PostgreSQL cache via shared helper (no Gaia queries)."""
+    return _pg_load_stars_from_cache(dsn, limit=limit, offset=offset)
 
-def check_sky_coverage_bias(db_path):
+def check_sky_coverage_bias(dsn):
     """Check if database has biased sky coverage (e.g., only northern hemisphere).
     Returns (has_bias, message) where has_bias is True if bias detected."""
-    if not db_path.exists():
-        return False, None
-    
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-    
-    # Check dec distribution
-    cursor.execute("SELECT COUNT(*) FROM gaia_source WHERE dec < 0")
-    n_neg = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM gaia_source")
-    total = cursor.fetchone()[0]
-    conn.close()
-    
-    if total == 0:
-        return False, None
-    
-    neg_ratio = n_neg / total
-    # If less than 10% have dec < 0, likely biased (should be ~50% for uniform sky)
-    if neg_ratio < 0.1:
-        return True, (
-            f"WARNING: Database appears to have biased sky coverage. "
-            f"Only {n_neg:,} stars ({100*neg_ratio:.1f}%) have dec < 0 (should be ~50%). "
-            f"This is likely due to ORDER BY source_id in old downloads. "
-            f"Re-download with --force-refresh to get uniform coverage."
-        )
-    
-    return False, None
+    return _pg_check_sky_coverage_bias(dsn)
 
 def ensure_cache_populated(force_refresh=False, star_limit=None):
-    """Ensure the SQLite cache is populated from both Gaia and Simbad.
-    
+    """Ensure the PostgreSQL cache is populated from both Gaia and Simbad.
+
     For Gaia, we top up to ``star_limit`` (if provided) using the Gaia Archive
     (with VizieR fallback on 408 timeouts). For Simbad, we use TAP to fetch
     additional stars in bulk so that the number of Simbad-sourced stars in
     ``gaia_source`` matches the Gaia target as closely as possible.
-    
+
     Args:
-        force_refresh: If True, delete existing cache and re-download.
+        force_refresh: If True, truncate tables and re-download.
         star_limit: Target number of stars to cache per source (None = no limit).
-    
+
     Returns:
         Total number of stars in the cache.
     """
-    if force_refresh and CACHE_DB.exists():
-        print(f"Removing existing database {CACHE_DB}...")
-        CACHE_DB.unlink()
+    if force_refresh:
+        print("Force-refreshing: truncating PostgreSQL tables...")
+        conn = init_database(PG_DSN)
+        cursor = conn.cursor()
+        for tbl in ("star_cartesian_earth", "simbad_cache_aliases", "simbad_cache", "gaia_source"):
+            cursor.execute(f"TRUNCATE TABLE {tbl} CASCADE")
+        conn.commit()
+        conn.close()
 
-    # Ensure schema is up to date (creates DB if missing, adds source column if missing)
-    init_database(CACHE_DB)
+    init_database(PG_DSN)
 
-    existing_count = get_star_count(CACHE_DB)
-    gaia_count = _sqlite_get_star_count_by_source(CACHE_DB, "gaia")
-    simbad_count = _sqlite_get_star_count_by_source(CACHE_DB, "simbad")
+    existing_count = get_star_count(PG_DSN)
+    gaia_count = _pg_get_star_count_by_source(PG_DSN, "gaia")
+    simbad_count = _pg_get_star_count_by_source(PG_DSN, "simbad")
 
     # We never try to pull an unbounded number of stars from Simbad; bulk TAP
     # queries are capped for practicality and service limits.
     SIMBAD_BULK_MAX = DEFAULT_STAR_LIMIT
 
     if existing_count > 0 and not force_refresh:
-        has_bias, bias_msg = check_sky_coverage_bias(CACHE_DB)
+        has_bias, bias_msg = check_sky_coverage_bias(PG_DSN)
         if has_bias:
             print(f"\n{bias_msg}\n")
 
@@ -274,7 +251,7 @@ def ensure_cache_populated(force_refresh=False, star_limit=None):
     # is provided we use the same value as the Simbad target but the helper will
     # internally cap that to a reasonable maximum.
     _ensure_simbad_ingested(star_limit=star_limit)
-    return get_star_count(CACHE_DB)
+    return get_star_count(PG_DSN)
 
 
 def _ensure_simbad_ingested(star_limit=None):
@@ -286,7 +263,7 @@ def _ensure_simbad_ingested(star_limit=None):
     """
     from lib.simbad_client import ingest_simbad_bulk_into_gaia_source
 
-    simbad_count = _sqlite_get_star_count_by_source(CACHE_DB, "simbad")
+    simbad_count = _pg_get_star_count_by_source(PG_DSN, "simbad")
 
     if star_limit is not None:
         to_fetch = max(0, star_limit - simbad_count)
@@ -298,7 +275,7 @@ def _ensure_simbad_ingested(star_limit=None):
         )
         try:
             n = ingest_simbad_bulk_into_gaia_source(
-                CACHE_DB,
+                PG_DSN,
                 to_fetch,
                 cache_simbad=True,
             )
@@ -310,7 +287,6 @@ def _ensure_simbad_ingested(star_limit=None):
                 file=sys.stderr,
             )
     else:
-        # No explicit limit: ensure we have at least a baseline of Simbad stars
         if simbad_count > 0:
             return
         baseline = DEFAULT_STAR_LIMIT
@@ -319,7 +295,7 @@ def _ensure_simbad_ingested(star_limit=None):
         )
         try:
             n = ingest_simbad_bulk_into_gaia_source(
-                CACHE_DB,
+                PG_DSN,
                 baseline,
                 cache_simbad=True,
             )
@@ -367,11 +343,11 @@ def _update_progress_bar(pbar, chunk_num, chunk_inserted, duplicates, stars_inse
         sys.stdout.flush()
 
 def _download_from_gaia(star_limit=None, existing_count=0):
-    """Download data from Gaia API and store in SQLite cache via shared helper."""
+    """Download data from Gaia API and store in PostgreSQL cache via shared helper."""
     from lib.gaia_client import _download_from_gaia as _gaia_download_from_gaia
 
     return _gaia_download_from_gaia(
-        cache_db=CACHE_DB,
+        cache_db=PG_DSN,
         chunk_size=CHUNK_SIZE,
         star_limit=star_limit,
         existing_count=existing_count,
@@ -392,7 +368,7 @@ def _download_from_vizier(star_limit=None):
     try:
         n = download_vizier_catalog(
             GAIA_VIZIER_CATALOG,
-            CACHE_DB,
+            PG_DSN,
             row_limit=vizier_limit,
             merge_into_gaia=True,
         )
@@ -1701,7 +1677,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
         print("Mode: dump positions to DB (no images)")
     
     # Ensure directories exist
-    init_database(CACHE_DB)
+    init_database(PG_DSN)
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     
     # Special case: Sol / Sun — observer at solar system barycenter (origin)
@@ -1712,7 +1688,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     else:
         # 1. Get Target Star from cache or Gaia
         print(f"Checking cache for target star: {target_star_name}...")
-        target_data = get_target_star_from_cache(CACHE_DB, target_star_name)
+        target_data = get_target_star_from_cache(PG_DSN, target_star_name)
         
         if target_data is None:
             print(f"Target star not found in cache. Querying Gaia...")
@@ -1723,7 +1699,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
                 print(f"  Check the name (e.g. 'Arcturus' not 'Arcturis') and try again. Skipping this target.", file=sys.stderr)
                 return False
             print(f"Caching target star in database...")
-            cache_target_star(CACHE_DB, target_data)
+            cache_target_star(PG_DSN, target_data)
             print(f"  Target star cached successfully.")
         else:
             print(f"  Target star found in cache:")
@@ -1762,10 +1738,10 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     if num_stars == 0:
         raise RuntimeError("No stars found in database. Download failed or database is empty.")
     
-    print(f"\nProcessing {num_stars:,} stars from SQLite cache...")
+    print(f"\nProcessing {num_stars:,} stars from PostgreSQL cache...")
     print("(All operations use cached data, not Gaia API)")
-    
-    # 4. Load all data from SQLite cache and process
+
+    # 4. Load all data from PostgreSQL cache and process
     PROCESS_CHUNK_SIZE = 500000
     all_azimuth_rad = []
     all_elevation_rad = []
@@ -1786,7 +1762,7 @@ def generate_galactic_hemispheres(target_star_name, search_radius_pc=15, force_r
     try:
         offset = 0
         while offset < total_stars:
-            chunk_data = load_stars_from_cache(CACHE_DB, limit=PROCESS_CHUNK_SIZE, offset=offset)
+            chunk_data = load_stars_from_cache(PG_DSN, limit=PROCESS_CHUNK_SIZE, offset=offset)
             if chunk_data is None or len(chunk_data) == 0:
                 break
             chunk_size = len(chunk_data)

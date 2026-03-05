@@ -1,5 +1,5 @@
 """
-Query Simbad and cache results in SQLite, similar to Gaia cache.
+Query Simbad and cache results in PostgreSQL, similar to Gaia cache.
 
 Use this to flesh out gaps: e.g. objects not in Gaia, or to refresh positions/magnitudes
 for known objects. Simbad is rate-limited (recommended 5–10 queries/sec); batch
@@ -8,12 +8,12 @@ queries via query_objects() count as one query.
 
 import hashlib
 import time
-from pathlib import Path
 
 from astropy.table import Table
+import psycopg2.extras
 
 from .constants import ASSUMED_BACKGROUND_DISTANCE_PC
-from .sqlite_helper import (
+from .pg_helper import (
     init_database,
     get_simbad_from_cache,
     put_simbad_in_cache,
@@ -86,7 +86,7 @@ def _row_to_dict(table: Table, row) -> dict | None:
 
 
 def query_simbad_and_cache(
-    cache_db: Path,
+    cache_db: str,
     identifiers: list[str],
     *,
     delay_sec: float = SIMBAD_QUERY_DELAY_SEC,
@@ -140,7 +140,7 @@ def query_simbad_and_cache(
     return rows
 
 
-def get_from_simbad_or_cache(cache_db: Path, identifier: str) -> dict | None:
+def get_from_simbad_or_cache(cache_db: str, identifier: str) -> dict | None:
     """
     Return Simbad data for one object: from cache if present, otherwise query
     Simbad, cache the result, and return it. Returns None if not found or on error.
@@ -204,7 +204,7 @@ def _tap_row_to_dict(table: Table, row) -> dict | None:
 
 
 def query_simbad_bulk_tap(
-    cache_db: Path,
+    cache_db: str,
     row_limit: int,
     *,
     async_job: bool = False,
@@ -220,7 +220,7 @@ def query_simbad_bulk_tap(
     (main_id, ra, dec, parallax_mas, vmag, otype).
 
     Args:
-        cache_db: Path to cache database (used to ensure schema exists).
+        cache_db: PostgreSQL DSN (used to ensure schema exists).
         row_limit: Maximum number of rows to request (TOP N in ADQL).
         async_job: If True, run the TAP job asynchronously. Defaults to False to
             avoid issues with some TAP async endpoints.
@@ -289,7 +289,7 @@ def query_simbad_bulk_tap(
 
 
 def ingest_simbad_bulk_into_gaia_source(
-    cache_db: Path,
+    cache_db: str,
     row_limit: int,
     *,
     async_job: bool = False,
@@ -301,7 +301,7 @@ def ingest_simbad_bulk_into_gaia_source(
     gaia_source with source='simbad'. Does not require a pre-defined star list.
 
     Args:
-        cache_db: Path to cache database.
+        cache_db: PostgreSQL DSN connection string.
         row_limit: Max number of stars to request from Simbad TAP.
         async_job: Passed to query_simbad_bulk_tap (defaults to False).
         timeout_sec: Passed to query_simbad_bulk_tap.
@@ -349,13 +349,16 @@ def ingest_simbad_bulk_into_gaia_source(
 
     conn = init_database(cache_db)
     cursor = conn.cursor()
-    cursor.executemany(
+    psycopg2.extras.execute_values(
+        cursor,
         """
-        INSERT OR IGNORE INTO gaia_source
+        INSERT INTO gaia_source
         (source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp, source)
-        VALUES (?, ?, ?, ?, ?, ?, 'simbad')
+        VALUES %s
+        ON CONFLICT (source_id) DO NOTHING
         """,
-        gaia_rows,
+        [(s, r, d, p, g, b, "simbad") for s, r, d, p, g, b in gaia_rows],
+        page_size=5000,
     )
     n = cursor.rowcount
     conn.commit()
@@ -375,7 +378,7 @@ def ingest_simbad_bulk_into_gaia_source(
 
 
 def ingest_simbad_into_gaia_source(
-    cache_db: Path,
+    cache_db: str,
     identifiers: list[str],
 ) -> int:
     """
@@ -421,13 +424,16 @@ def ingest_simbad_into_gaia_source(
 
     conn = init_database(cache_db)
     cursor = conn.cursor()
-    cursor.executemany(
+    psycopg2.extras.execute_values(
+        cursor,
         """
-        INSERT OR IGNORE INTO gaia_source
+        INSERT INTO gaia_source
         (source_id, ra, dec, parallax, phot_g_mean_mag, bp_rp, source)
-        VALUES (?, ?, ?, ?, ?, ?, 'simbad')
+        VALUES %s
+        ON CONFLICT (source_id) DO NOTHING
         """,
-        gaia_rows,
+        [(s, r, d, p, g, b, "simbad") for s, r, d, p, g, b in gaia_rows],
+        page_size=5000,
     )
     n = cursor.rowcount
     conn.commit()
